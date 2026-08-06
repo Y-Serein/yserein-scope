@@ -1,0 +1,10 @@
+{
+  "id": "tn160-thermal",
+  "name": "TN160 Thermal",
+  "description": "TN160 专项生产与诊断组件，覆盖 UF2 烧录、实时热诊断、设备标定和 Flash 数据检查。",
+  "version": "1.0.1",
+  "category": "Device component",
+  "accent": "#f0ad69",
+  "capabilities": ["UF2", "热图", "FFC", "标定"],
+  "interfaceVersion": 2
+}

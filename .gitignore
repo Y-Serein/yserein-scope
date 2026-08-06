@@ -1,0 +1,48 @@
+# CMake / Qt / IDE build products
+/build/
+/build-*/
+/build-win/
+/out/
+/dist/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/compile_commands.json
+/.vs/
+/.vscode/
+/.idea/
+*.user
+*.user.*
+*.pro.user
+*.qtc_clangd
+*.qmake.stash
+
+# Native binaries and packaged components
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.lib
+*.a
+*.o
+*.obj
+*.sscomponent
+
+# Runtime output and formal deliverables
+/D_deliverables/
+/C_context/
+/R_raw/
+/logs/
+*.log
+*.zip
+*.sha256.txt
+
+# Session/process material, design evidence and local tooling
+/.agents/
+/.codex/
+/AGENTS.md
+/HANDOFF.md
+/MEMORY.md
+/designs/
+/docs/
+/tools/

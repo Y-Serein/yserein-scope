@@ -1,0 +1,10 @@
+{
+  "id": "serial-scope",
+  "name": "Serial Scope",
+  "description": "连接任意串口设备，解析多通道文本数据，并同时观察波形、通道和终端。",
+  "version": "1.0.1",
+  "category": "Instrument component",
+  "accent": "#65d1c5",
+  "capabilities": ["串口", "波形", "多通道", "终端"],
+  "interfaceVersion": 2
+}
