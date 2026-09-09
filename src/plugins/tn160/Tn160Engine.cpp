@@ -10,6 +10,10 @@
 namespace serein::scope::tn160 {
 namespace {
 
+constexpr qint16 MinimumEncodedTemperatureX10 = -3000;
+constexpr qint16 MaximumEncodedTemperatureX10 = 3200;
+constexpr qint16 MinimumUsableTemperatureX10 = -1000;
+
 template<typename T>
 T readBe(const char *data)
 {
@@ -20,7 +24,7 @@ T readBe(const char *data)
 
 QString Tn160Engine::id() const
 {
-    return QStringLiteral("tn160.monitor.v1");
+    return QString::fromLatin1(Tn160MonitorSource);
 }
 
 QString Tn160Engine::displayName() const
@@ -46,7 +50,11 @@ bool Tn160Engine::plausible(const QByteArrayView frame)
     const qint16 low = readBe<qint16>(raw + base + 2);
     const qint16 high = readBe<qint16>(raw + base + 4);
     if (!(low == 0x7fff && high == 0x7fff)) {
-        if (low < -1000 || low > 3200 || high < -1000 || high > 3200 || high < low) {
+        if (low < MinimumEncodedTemperatureX10
+            || low > MaximumEncodedTemperatureX10
+            || high < MinimumEncodedTemperatureX10
+            || high > MaximumEncodedTemperatureX10
+            || high < low) {
             return false;
         }
     }
@@ -72,7 +80,9 @@ bool Tn160Engine::plausible(const QByteArrayView frame)
         return false;
     }
     for (const qint16 center : {centerRaw, centerRoi}) {
-        if (center != 0x7fff && (center < -1000 || center > 3200)) {
+        if (center != 0x7fff
+            && (center < MinimumEncodedTemperatureX10
+                || center > MaximumEncodedTemperatureX10)) {
             return false;
         }
     }
@@ -143,12 +153,15 @@ ParseResult Tn160Engine::feed(const QByteArrayView buffer)
         if (decodeTelemetry(candidate, telemetry)) {
             const char *raw = candidate.data();
             const qint64 now = QDateTime::currentMSecsSinceEpoch() * 1000;
-            const double center = telemetry.centerRoiX10 == 0x7fff
-                ? std::numeric_limits<double>::quiet_NaN()
-                : telemetry.centerRoiX10 / 10.0;
-            const double centerRaw = telemetry.centerRawX10 == 0x7fff
-                ? std::numeric_limits<double>::quiet_NaN()
-                : telemetry.centerRawX10 / 10.0;
+            const auto usableTemperature = [](const qint16 value) {
+                return value == 0x7fff
+                        || value < MinimumUsableTemperatureX10
+                        || value > MaximumEncodedTemperatureX10
+                    ? std::numeric_limits<double>::quiet_NaN()
+                    : value / 10.0;
+            };
+            const double center = usableTemperature(telemetry.centerRoiX10);
+            const double centerRaw = usableTemperature(telemetry.centerRawX10);
             PacketList packets;
             packets.append(ImagePacket{
                 now,
@@ -164,8 +177,8 @@ ParseResult Tn160Engine::feed(const QByteArrayView buffer)
                  double(telemetry.centerRoiAdu), double(telemetry.vtemp),
                  centerRaw, double(telemetry.centerRawAdu),
                  double(telemetry.ntc), double(telemetry.ntcRef),
-                 double(telemetry.tLowX10) / 10.0,
-                 double(telemetry.tHighX10) / 10.0,
+                 usableTemperature(telemetry.tLowX10),
+                 usableTemperature(telemetry.tHighX10),
                  double(telemetry.smoothLow), double(telemetry.smoothHigh),
                  double(telemetry.meanDiff), double(telemetry.smoothVtemp),
                  double(telemetry.nucDecision), double(telemetry.nucCount),

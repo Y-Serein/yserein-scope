@@ -1,4 +1,5 @@
 add_library(serein_scope_tn160 MODULE
+    ../Tn160ProductionStateGate.h
     plugin.json
     CalibrationPage.h
     CalibrationPage.cpp
@@ -8,10 +9,16 @@ add_library(serein_scope_tn160 MODULE
     FirmwarePage.cpp
     LivePage.h
     LivePage.cpp
+    ProductionCalibrationPage.h
+    ProductionCalibrationPage.cpp
+    Tn160ProductionFrameFilter.h
+    Tn160ProductionFrameFilter.cpp
     ThermalView.h
     ThermalView.cpp
     Tn160Engine.h
     Tn160Engine.cpp
+    Tn160ProtocolEngines.h
+    Tn160ProtocolEngines.cpp
     Tn160PortSelection.h
     Tn160Plugin.h
     Tn160Plugin.cpp
@@ -19,8 +26,6 @@ add_library(serein_scope_tn160 MODULE
     Tn160Workspace.cpp
     TrendWidget.h
     TrendWidget.cpp
-    WorkspaceCanvas.h
-    WorkspaceCanvas.cpp
 )
 
 target_link_libraries(serein_scope_tn160

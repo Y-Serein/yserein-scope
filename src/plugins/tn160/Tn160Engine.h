@@ -7,6 +7,37 @@ namespace serein::scope::tn160 {
 inline constexpr int FrameWidth = 160;
 inline constexpr int FrameHeight = 120;
 inline constexpr int FrameSize = 19255;
+inline constexpr auto Tn160MonitorSource = "tn160.monitor.v1";
+
+enum MonitorSampleIndex : qsizetype {
+    MonitorCenterRoiC = 0,
+    MonitorNtcC,
+    MonitorCenterRoiAdu,
+    MonitorVtemp,
+    MonitorCenterRawC,
+    MonitorCenterRawAdu,
+    MonitorNtcAdu,
+    MonitorNtcRefAdu,
+    MonitorTLowC,
+    MonitorTHighC,
+    MonitorSmoothLowAdu,
+    MonitorSmoothHighAdu,
+    MonitorMeanDiff,
+    MonitorSmoothVtempAdu,
+    MonitorNucDecision,
+    MonitorNucCount,
+    MonitorNucDg,
+    MonitorNucDv,
+    MonitorNucDn,
+    MonitorBootNtcAdu,
+    MonitorBootDeltaAdu,
+    MonitorWarmupComp,
+    MonitorNormalComp,
+    MonitorTotalComp,
+    MonitorAnchor,
+    MonitorEffectiveAnchor,
+    MonitorSampleCount,
+};
 
 struct MonitorTelemetry {
     quint16 vtemp = 0;

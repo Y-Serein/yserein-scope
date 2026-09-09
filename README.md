@@ -37,48 +37,38 @@ C:\DOWNLOAD\Qt\Tools\CMake_64
 C:\DOWNLOAD\Qt\Tools\Ninja
 ```
 
-双击：
+在 Windows PowerShell 运行唯一构建入口：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Serein_Y\Project\yserein-scope\tools\windows_user_action.ps1"
+```
+
+CMake 缓存和中间文件固定在 `build/windows-release/`。
+构建和候选目录生命周期检查通过后，生成一套可直接运行的扁平交付：
 
 ```text
-build_win.bat
+out/yserein-scope/
+├── SereinScope.exe
+├── libserein_scope_core.dll
+├── Qt6*.dll / platforms/ / qml/ ...
+├── Components/
+│   ├── serial-scope.sscomponent
+│   ├── tn160-thermal.sscomponent
+│   ├── tn160-thermal-ncm.sscomponent
+│   └── yserein-hmi.sscomponent
+└── SHA256SUMS.txt
 ```
 
-正式交付物固定为：
-
-```text
-dist/
-├── SereinScope.zip               # Windows 宿主与独立插件包
-└── SereinScope.zip.sha256.txt
-```
-
-脚本成功后自动删除中间 `build-win/`。ZIP必须完整解压，不能只发送EXE。解压结构：
-
-```text
-SereinScope/                       # 通用宿主，双击SereinScope.exe
-Components/
-├── SereinScope.SerialScope.sscomponent
-└── SereinScope.TN160.sscomponent
-```
-
-宿主首次启动不加载任何设备插件。进入“插件管理”，点击“导入插件包”，从同级 `Components/` 选择 TN160 或 Serial Scope；导入后再点击“加载插件”。关闭工作区不会卸载 DLL，点击“卸载插件”才会从进程释放。
-
-若Qt位置不同，可在命令行先设置：
-
-```bat
-set QT_ROOT=D:\Qt\6.x.x\mingw_64
-set QT_TOOLS=D:\Qt\Tools
-build_win.bat
-```
+`out/run-win/` 只保留当前已验收的运行基线，构建脚本不会覆盖它。
 
 ## Linux开发构建
 
 需要 Qt 6 Base 开发包，不需要 Qt SerialPort：
 
 ```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
-./build/bin/SereinScope
+cmake -S . -B build/linux-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/linux-debug --parallel
+./build/linux-debug/bin/SereinScope
 ```
 
 ## 目录结构
@@ -90,7 +80,6 @@ src/
 └── plugins/
     ├── serial_scope/             # 通用串口插件包
     └── tn160/                    # TN160 专项插件包
-tests/                            # 数据引擎、插件加载和工作区无头测试
 docs/
 ├── architecture.md
 └── plugin_development.md
@@ -102,6 +91,6 @@ docs/
 - ABI 2 插件必须使用与宿主兼容的 Qt、编译器、CPU 架构和 Serein Core 构建；ABI 1 会被明确拒绝。
 - TN160 实时诊断和 Serial Scope 均使用原生组件画布；通用组件注册、拖入组件库、录制回放和标签页独立窗口属于后续阶段。
 - C++插件必须与宿主使用兼容的Qt、编译器和Serein插件ABI构建；`interfaceVersion`不匹配会拒绝加载。
-- 固件、串口和标定流程已完成软件构建与无头测试，但仍需真实Windows设备验证。
+- 固件、串口和标定流程仍需真实 Windows 设备验证；发布脚本保留组件生命周期 smoke 检查。
 
 详细设计见 [architecture.md](docs/architecture.md) 和 [plugin_development.md](docs/plugin_development.md)。

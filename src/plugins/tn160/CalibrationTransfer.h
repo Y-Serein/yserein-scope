@@ -1,6 +1,6 @@
 #pragma once
 
-#include <serein/scope/SerialTransport.h>
+#include <serein/scope/SerialDataSession.h>
 
 #include <QtCore/QObject>
 #include <QtCore/QTimer>
@@ -25,7 +25,7 @@ signals:
 
 private slots:
     void handleState(const QString &state);
-    void handleData(const QByteArray &data);
+    void handleDecodedPackets(const serein::scope::PacketList &packets);
     void handleError(const QString &message);
     void handleTimeout();
 
@@ -33,26 +33,34 @@ private:
     enum class Stage {
         Idle,
         TriggerOpening,
-        TriggerSent,
         TriggerClosing,
         ReadOpening,
         Reading,
+        RestoreHighClosing,
+        RestoreHighOpening,
+        RestoreHighCommandClosing,
+        RestoreUvcOpening,
+        RestoreUvcCommandClosing,
+        RecoveryFailedClosing,
         Closing,
     };
 
-    void parseBuffer();
     void finish(bool success, const QString &message);
+    void completePending();
+    void failRecovery(const QString &message);
+    [[nodiscard]] bool recoveryActive() const noexcept;
 
-    SerialTransport m_transport;
+    SerialDataSession m_transport;
     QTimer m_timeout;
     Stage m_stage = Stage::Idle;
     Mode m_mode = Mode::Dump;
     QString m_port;
     int m_readBaud = 5000000;
-    QByteArray m_buffer;
     QList<int> m_payloadSizes;
     int m_payloadIndex = 0;
     bool m_completionEmitted = false;
+    bool m_pendingSuccess = false;
+    QString m_pendingMessage;
 };
 
 } // namespace serein::scope::tn160

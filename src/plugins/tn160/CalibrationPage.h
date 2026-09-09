@@ -32,6 +32,7 @@ public slots:
     void setTriggerBaud(int baud);
     void setReadBaud(int baud);
     [[nodiscard]] bool transferActive() const noexcept;
+    [[nodiscard]] QWidget *contextPanel() const noexcept;
 
 signals:
     void transferStateChanged(const QString &state, const QString &text);
@@ -60,6 +61,7 @@ private:
     QSpinBox *m_readBaud = nullptr;
     QPushButton *m_run = nullptr;
     QLabel *m_state = nullptr;
+    QWidget *m_contextPanel = nullptr;
     ThermalView *m_lowImage = nullptr;
     ThermalView *m_highImage = nullptr;
     ThermalView *m_deltaImage = nullptr;

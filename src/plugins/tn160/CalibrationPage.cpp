@@ -3,6 +3,7 @@
 #include "Tn160PortSelection.h"
 
 #include <serein/scope/SerialTransport.h>
+#include <serein/scope/WorkspaceCanvas.h>
 
 #include <QtCore/QtEndian>
 #include <QtWidgets/QComboBox>
@@ -21,44 +22,76 @@
 #include <numeric>
 
 namespace serein::scope::tn160 {
+namespace {
+
+struct ResultPanelChrome {
+    QFrame *panel = nullptr;
+    QVBoxLayout *bodyLayout = nullptr;
+};
+
+ResultPanelChrome makeResultPanel(const QString &title)
+{
+    auto *panel = new ComponentSurface(title);
+    auto *bodyLayout = new QVBoxLayout(panel->contentHost());
+    bodyLayout->setContentsMargins(10, 8, 10, 10);
+    bodyLayout->setSpacing(6);
+    return {panel, bodyLayout};
+}
+
+} // namespace
 
 CalibrationPage::CalibrationPage(const CalibrationTransfer::Mode mode,
                                  IHostServices *host, QWidget *parent)
     : QWidget(parent), m_mode(mode), m_host(host), m_transfer(this)
 {
-    // Transport controls live in the host's left device panel. Keep the
-    // actual widgets hidden here so CalibrationTransfer remains the single
-    // owner of its port and baud-rate state without rendering a second action
-    // bar inside the TN160 page.
-    auto *transportState = new QWidget(this);
-    transportState->setObjectName(mode == CalibrationTransfer::Mode::Calibrate
-                                      ? QStringLiteral("tn160CalibrationTransportState")
-                                      : QStringLiteral("tn160CalibrationDataTransportState"));
-    transportState->hide();
-    m_port = new QComboBox(transportState);
+    m_contextPanel = new QWidget(this);
+    m_contextPanel->setObjectName(QStringLiteral("workspaceContextContent"));
+    auto *contextLayout = new QVBoxLayout(m_contextPanel);
+    contextLayout->setContentsMargins(0, 0, 0, 0);
+    contextLayout->setSpacing(8);
+    auto *hint = new QLabel(mode == CalibrationTransfer::Mode::Calibrate
+                                ? tr("工程标定会话") : tr("标定数据只读检查"),
+                            m_contextPanel);
+    hint->setObjectName(QStringLiteral("pageSubtitle"));
+    hint->setWordWrap(true);
+    contextLayout->addWidget(hint);
+    contextLayout->addWidget(new QLabel(tr("串口"), m_contextPanel));
+    m_port = new QComboBox(m_contextPanel);
     m_port->setObjectName(mode == CalibrationTransfer::Mode::Calibrate
                               ? QStringLiteral("tn160CalibrationPort")
                               : QStringLiteral("tn160CalibrationDataPort"));
     m_port->setMinimumWidth(120);
-    m_triggerBaud = new QSpinBox(transportState);
+    contextLayout->addWidget(m_port);
+    contextLayout->addWidget(new QLabel(tr("触发波特率"), m_contextPanel));
+    m_triggerBaud = new QSpinBox(m_contextPanel);
     m_triggerBaud->setObjectName(QStringLiteral("tn160CalibrationTriggerBaud"));
     m_triggerBaud->setRange(300, 12000000);
     m_triggerBaud->setValue(2000000);
     m_triggerBaud->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    m_readBaud = new QSpinBox(transportState);
+    contextLayout->addWidget(m_triggerBaud);
+    contextLayout->addWidget(new QLabel(tr("读取波特率"), m_contextPanel));
+    m_readBaud = new QSpinBox(m_contextPanel);
     m_readBaud->setObjectName(QStringLiteral("tn160CalibrationReadBaud"));
     m_readBaud->setRange(300, 12000000);
     m_readBaud->setValue(5000000);
     m_readBaud->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    contextLayout->addWidget(m_readBaud);
+    auto *actions = new QHBoxLayout;
+    auto *scan = new QPushButton(tr("刷新"), m_contextPanel);
     m_run = new QPushButton(mode == CalibrationTransfer::Mode::Calibrate
-                                ? tr("开始标定") : tr("读取标定数据"), transportState);
+                                ? tr("开始标定") : tr("读取标定数据"), m_contextPanel);
     m_run->setProperty("kind", QStringLiteral("primary"));
+    actions->addWidget(scan);
+    actions->addWidget(m_run, 1);
+    contextLayout->addLayout(actions);
 
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(4, 4, 4, 4);
     root->setSpacing(10);
-    m_state = new QLabel(tr("就绪"), transportState);
+    m_state = new QLabel(tr("就绪"), m_contextPanel);
     m_state->setObjectName(QStringLiteral("statusPill"));
+    contextLayout->addWidget(m_state);
+    contextLayout->addStretch();
 
     auto *results = new QGridLayout;
     results->setContentsMargins(0, 0, 0, 0);
@@ -66,36 +99,22 @@ CalibrationPage::CalibrationPage(const CalibrationTransfer::Mode mode,
     results->setVerticalSpacing(10);
     auto makeImagePanel = [](const QString &title, const ThermalView::PaletteMode palette,
                              ThermalView **view) {
-        auto *panel = new QFrame;
-        panel->setObjectName(QStringLiteral("resultPanel"));
-        auto *layout = new QVBoxLayout(panel);
-        layout->setContentsMargins(10, 8, 10, 10);
-        layout->setSpacing(6);
-        auto *label = new QLabel(title);
-        label->setObjectName(QStringLiteral("chartTitle"));
-        *view = new ThermalView;
+        const ResultPanelChrome chrome = makeResultPanel(title);
+        *view = new ThermalView(chrome.panel);
         (*view)->setPaletteMode(palette);
         (*view)->setCrosshairVisible(false);
         (*view)->setMinimumSize(120, 90);
-        layout->addWidget(label);
-        layout->addWidget(*view, 1);
-        return panel;
+        chrome.bodyLayout->addWidget(*view, 1);
+        return chrome.panel;
     };
     const auto makeBadPointPanel = [this] {
-        auto *panel = new QFrame;
-        panel->setObjectName(QStringLiteral("resultPanel"));
-        auto *layout = new QVBoxLayout(panel);
-        layout->setContentsMargins(10, 8, 10, 10);
-        layout->setSpacing(6);
-        auto *title = new QLabel(tr("坏点分布"));
-        title->setObjectName(QStringLiteral("chartTitle"));
-        m_badPointSummary = new QLabel(tr("暂无标定数据"));
+        const ResultPanelChrome chrome = makeResultPanel(tr("坏点分布"));
+        m_badPointSummary = new QLabel(tr("暂无标定数据"), chrome.panel);
         m_badPointSummary->setObjectName(QStringLiteral("badPointSummary"));
         m_badPointSummary->setAlignment(Qt::AlignCenter);
         m_badPointSummary->setWordWrap(true);
-        layout->addWidget(title);
-        layout->addWidget(m_badPointSummary, 1);
-        return panel;
+        chrome.bodyLayout->addWidget(m_badPointSummary, 1);
+        return chrome.panel;
     };
     if (mode == CalibrationTransfer::Mode::Calibrate) {
         results->addWidget(makeImagePanel(tr("低温帧 · img_l"), ThermalView::PaletteMode::Grayscale,
@@ -123,6 +142,7 @@ CalibrationPage::CalibrationPage(const CalibrationTransfer::Mode mode,
     root->addLayout(results, 1);
 
     connect(m_run, &QPushButton::clicked, this, &CalibrationPage::startTransfer);
+    connect(scan, &QPushButton::clicked, this, &CalibrationPage::refreshPorts);
     connect(&m_transfer, &CalibrationTransfer::progress,
             this, &CalibrationPage::appendProgress);
     connect(&m_transfer, &CalibrationTransfer::payloadReady,
@@ -135,6 +155,11 @@ CalibrationPage::CalibrationPage(const CalibrationTransfer::Mode mode,
 void CalibrationPage::shutdown()
 {
     m_transfer.cancel();
+}
+
+QWidget *CalibrationPage::contextPanel() const noexcept
+{
+    return m_contextPanel;
 }
 
 void CalibrationPage::refreshPorts()

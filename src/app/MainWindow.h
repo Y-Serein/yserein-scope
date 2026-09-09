@@ -1,8 +1,11 @@
 #pragma once
 
 #include <serein/scope/PluginInterface.h>
+#include <serein/scope/WorkspaceComponents.h>
 
+#include <QtCore/QPoint>
 #include <QtCore/QPointer>
+#include <QtCore/QHash>
 #include <QtWidgets/QMainWindow>
 
 #include <memory>
@@ -15,8 +18,6 @@ class QVBoxLayout;
 class QMainWindow;
 class QPaintEvent;
 class QResizeEvent;
-class QComboBox;
-class QAbstractSpinBox;
 class QGridLayout;
 class QLabel;
 class QListWidget;
@@ -24,7 +25,6 @@ class QMenuBar;
 class QPlainTextEdit;
 class QPushButton;
 class QStackedWidget;
-class QSpinBox;
 class QTabBar;
 class QToolButton;
 class QFrame;
@@ -46,26 +46,36 @@ public:
 
 private slots:
     void navigationChanged();
+    void toggleComponentManagement();
     void importComponent();
     void refreshComponentUi();
+    void preparePageLayoutChange();
     void resetDockLayout();
-    void refreshConnectionPanel();
-    void scanConnectionPorts();
-    void toggleConnection();
+    void resetAllDockLayouts();
     void toggleDarkMode();
-    void updateConnectionState(const QString &state, const QString &text);
-    void updateCalibrationState(const QString &state, const QString &text);
-    void updateFirmwareState(const QString &path, const QString &status, bool monitoring);
-    void updateRawCaptureState(const QString &state, const QString &text);
-    void updateTn160Telemetry(const QString &center, const QString &ntc,
-                              const QString &centerAdu, const QString &vtemp,
-                              const QString &fps);
 
 private:
+    static constexpr int SidePanelDefaultWidth = 220;
+    static constexpr int SidePanelMinimumWidth = 165;
+    static constexpr int SidePanelMaximumWidth = 520;
+
+    struct PageLayoutPreset {
+        qreal outputFraction = 0.40;
+        bool outputVisible = true;
+        bool inspectorVisible = false;
+        int sidePanelWidth = SidePanelDefaultWidth;
+    };
+
     struct WorkspaceRecord {
         QString componentId;
         QPointer<QWidget> widget;
         int stackIndex = -1;
+    };
+
+    struct HeaderControlAttachment {
+        QPointer<QWidget> control;
+        QPointer<QWidget> owner;
+        int layoutIndex = -1;
     };
 
     void prepareComponents();
@@ -77,6 +87,15 @@ private:
     void buildDocks();
     void buildMenu();
     void applyDefaultDockLayout();
+    [[nodiscard]] QString currentPageLayoutContext() const;
+    [[nodiscard]] WorkspaceLayoutProfile currentLayoutProfile() const;
+    [[nodiscard]] PageLayoutPreset defaultPageLayout(const QString &context) const;
+    [[nodiscard]] PageLayoutPreset storedPageLayout(const QString &context) const;
+    void savePageLayout(const QString &context);
+    void switchPageLayoutContext();
+    void applyPageLayout(const QString &context, const PageLayoutPreset &layout);
+    void resizeSideDocksForPage(const PageLayoutPreset &layout);
+    void resizeOutputDockForCurrentPage();
     void rebuildWorkspaceTabs();
     void selectWorkspaceTab(const QString &id);
     void rebuildNavigation();
@@ -88,6 +107,8 @@ private:
     void requestRemove(const QString &componentId);
     bool closeWorkspace(const QString &componentId);
     bool isWorkspaceOpen(const QString &componentId) const;
+    [[nodiscard]] bool validateWorkspaceContract(QWidget *workspace,
+                                                 QString *error) const;
     WorkspaceRecord *findWorkspace(const QString &componentId);
     const WorkspaceRecord *findWorkspace(const QString &componentId) const;
     void updateInspector(const PluginMetadata *metadata);
@@ -96,17 +117,28 @@ private:
     QString componentPackageStartPath() const;
     void refreshComponentLibrary();
     void showLibraryComponent(const QString &componentId);
+    bool createRegisteredComponentAt(const QString &componentId,
+                                     const QPoint &position);
+    void synchronizeComponentRegistry();
     void synchronizeContextPanels();
-    void detachTn160Trend();
-    QObject *connectionTargetForCurrentWorkspace() const;
-    bool connectionTargetActive(QObject *target) const;
-    void setConnectionConfigurationEnabled(bool canConnect, bool serial,
-                                           bool calibration, bool locked);
+    void synchronizePanelHeaderControls();
+    void synchronizePanelHeaderControl(QDockWidget *dock, QWidget *panel,
+                                       QWidget *header,
+                                       const WorkspacePanelOptions &options,
+                                       HeaderControlAttachment &attachment);
+    void detachPanelHeaderControl(QWidget *header,
+                                  HeaderControlAttachment &attachment);
+    void detachWorkspaceHeaderControls();
+    void detachWorkspacePanels();
+    [[nodiscard]] WorkspaceUiProvider *activeWorkspaceUiProvider() const;
+    void setDockTitle(QDockWidget *dock, const QString &title);
 
     ComponentManager *m_components = nullptr;
+    WorkspaceComponentRegistry m_componentRegistry;
     std::vector<std::unique_ptr<WorkspaceRecord>> m_workspaces;
     QStringList m_pendingLogs;
     QString m_activePage;
+    QString m_pageBeforeComponentManagement;
     QListWidget *m_navigation = nullptr;
     QStackedWidget *m_stack = nullptr;
     QGridLayout *m_homeGrid = nullptr;
@@ -128,53 +160,50 @@ private:
     QToolButton *m_outputToggle = nullptr;
     QToolButton *m_componentsToggle = nullptr;
     QToolButton *m_sleepButton = nullptr;
-    QComboBox *m_connectionPort = nullptr;
-    QLabel *m_connectionBaudLabel = nullptr;
-    QSpinBox *m_connectionBaud = nullptr;
-    QLabel *m_connectionTriggerBaudLabel = nullptr;
-    QSpinBox *m_connectionTriggerBaud = nullptr;
-    QLabel *m_connectionReadBaudLabel = nullptr;
-    QSpinBox *m_connectionReadBaud = nullptr;
-    QLabel *m_tnRawFrameLabel = nullptr;
-    QSpinBox *m_tnRawFrameCount = nullptr;
-    QPushButton *m_tnRawCapture = nullptr;
-    QPushButton *m_connectionScan = nullptr;
-    QPushButton *m_connectionToggle = nullptr;
-    QLabel *m_connectionState = nullptr;
-    QLabel *m_connectionEngineLabel = nullptr;
-    QComboBox *m_connectionEngine = nullptr;
-    QStackedWidget *m_connectionModeStack = nullptr;
-    QPushButton *m_firmwareChoose = nullptr;
-    QPushButton *m_firmwareMonitor = nullptr;
-    QLabel *m_firmwarePath = nullptr;
-    QLabel *m_firmwareState = nullptr;
+    QWidget *m_contextContributionHost = nullptr;
+    QVBoxLayout *m_contextContributionLayout = nullptr;
+    QLabel *m_contextFallback = nullptr;
     QPlainTextEdit *m_output = nullptr;
+    QPushButton *m_outputClear = nullptr;
     QStackedWidget *m_outputStack = nullptr;
     QWidget *m_outputTrendHost = nullptr;
     QVBoxLayout *m_outputTrendLayout = nullptr;
     QPointer<QLabel> m_outputTrendEmpty;
-    QPointer<QWidget> m_attachedTn160Trend;
-    QPointer<QWidget> m_attachedTn160TrendOwner;
+    QPointer<QWidget> m_attachedContextPanel;
+    QPointer<QWidget> m_attachedContextPanelOwner;
+    QPointer<QWidget> m_attachedInspectorPanel;
+    QPointer<QWidget> m_attachedInspectorPanelOwner;
+    QPointer<QWidget> m_attachedOutputPanel;
+    QPointer<QWidget> m_attachedOutputPanelOwner;
+    HeaderControlAttachment m_contextHeaderAttachment;
+    HeaderControlAttachment m_inspectorHeaderAttachment;
+    HeaderControlAttachment m_outputHeaderAttachment;
+    QPointer<WorkspaceUiProvider> m_activeUiProvider;
     QListWidget *m_componentLibraryList = nullptr;
     QDockWidget *m_navigationDock = nullptr;
+    QWidget *m_navigationDockHeader = nullptr;
     QDockWidget *m_componentLibraryDock = nullptr;
     QDockWidget *m_outputDock = nullptr;
+    QWidget *m_outputDockHeader = nullptr;
     QDockWidget *m_inspectorDock = nullptr;
+    QWidget *m_inspectorDockHeader = nullptr;
     QLabel *m_inspectorName = nullptr;
     QLabel *m_inspectorDescription = nullptr;
     QLabel *m_inspectorMeta = nullptr;
     QLabel *m_inspectorCapabilities = nullptr;
-    QWidget *m_liveMetrics = nullptr;
-    QLabel *m_liveCenter = nullptr;
-    QLabel *m_liveNtc = nullptr;
-    QLabel *m_liveCenterAdu = nullptr;
-    QLabel *m_liveVtemp = nullptr;
-    QLabel *m_liveFps = nullptr;
+    QWidget *m_inspectorContributionHost = nullptr;
+    QVBoxLayout *m_inspectorBodyLayout = nullptr;
+    QVBoxLayout *m_inspectorContributionLayout = nullptr;
     QWidget *m_rootShell = nullptr;
     QHBoxLayout *m_rootLayout = nullptr;
     QMainWindow *m_workbenchWindow = nullptr;
     QMainWindow *m_centerWorkbenchWindow = nullptr;
     QFrame *m_activityRail = nullptr;
+    QString m_pageLayoutContext;
+    QHash<QString, WorkspaceLayoutProfile> m_pageLayoutProfiles;
+    bool m_pageLayoutsReady = false;
+    bool m_applyingPageLayout = false;
+    quint64 m_pageLayoutRevision = 0;
     int m_homeCardColumns = 0;
     int m_componentCardColumns = 0;
 

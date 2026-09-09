@@ -1,6 +1,7 @@
 #include "ComponentManager.h"
 
 #include <QtCore/QDir>
+#include <QtCore/QCoreApplication>
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
 #include <QtCore/QJsonArray>
@@ -81,6 +82,17 @@ QString ComponentManager::defaultStorePath()
     if (!overridePath.trimmed().isEmpty()) return QDir::cleanPath(overridePath);
     return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
         .filePath(QStringLiteral("components"));
+}
+
+QString ComponentManager::packagedStorePath()
+{
+    QDir direct(QCoreApplication::applicationDirPath());
+    if (direct.cd(QStringLiteral("Components"))) return direct.absolutePath();
+
+    QDir legacy(QCoreApplication::applicationDirPath());
+    legacy.cdUp();
+    if (legacy.cd(QStringLiteral("Components"))) return legacy.absolutePath();
+    return {};
 }
 
 QString ComponentManager::storePath() const

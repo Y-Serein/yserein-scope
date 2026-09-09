@@ -8,15 +8,10 @@ add_library(serein_scope_serial_scope MODULE
     SerialScopeWorkspace.cpp
     WaveformWidget.h
     WaveformWidget.cpp
-    ../tn160/WorkspaceCanvas.h
-    ../tn160/WorkspaceCanvas.cpp
 )
 
 target_link_libraries(serein_scope_serial_scope
     PRIVATE serein_scope_core Qt6::Core Qt6::Gui Qt6::Widgets
-)
-target_include_directories(serein_scope_serial_scope PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../tn160
 )
 set_target_properties(serein_scope_serial_scope PROPERTIES
     OUTPUT_NAME "SereinScope.SerialScope"

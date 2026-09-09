@@ -1,11 +1,13 @@
 #include "SerialScopeWorkspace.h"
 #include "DelimitedEngine.h"
 #include "WaveformWidget.h"
-#include "WorkspaceCanvas.h"
+
+#include <serein/scope/WorkspaceCanvas.h>
 
 #include <QtGui/QAction>
 #include <QtGui/QBrush>
 #include <QtGui/QTextDocument>
+#include <QtCore/QSettings>
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QFrame>
 #include <QtWidgets/QHBoxLayout>
@@ -21,36 +23,59 @@
 #include <QtWidgets/QVBoxLayout>
 
 #include <exception>
+#include <optional>
+#include <utility>
 
 namespace serein::scope::serial {
 
 SerialScopeWorkspace::SerialScopeWorkspace(IHostServices *host, QWidget *parent)
-    : QWidget(parent), m_host(host), m_transport(this)
+    : QWidget(parent), m_host(host),
+      m_session(std::make_unique<DelimitedEngine>(),
+                DecoderRuntime::configuredLimits(), this)
 {
     setObjectName(QStringLiteral("serialScopeWorkspace"));
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
-    auto *transportState = new QWidget(this);
-    transportState->setObjectName(QStringLiteral("serialTransportState"));
-    transportState->hide();
-    m_port = new QComboBox(transportState);
+    m_contextPanel = new QWidget(this);
+    m_contextPanel->setObjectName(QStringLiteral("workspaceContextContent"));
+    auto *contextLayout = new QVBoxLayout(m_contextPanel);
+    contextLayout->setContentsMargins(0, 0, 0, 0);
+    contextLayout->setSpacing(8);
+    auto *hint = new QLabel(tr("Serial Scope 串口会话"), m_contextPanel);
+    hint->setObjectName(QStringLiteral("pageSubtitle"));
+    contextLayout->addWidget(hint);
+    contextLayout->addWidget(new QLabel(tr("串口"), m_contextPanel));
+    m_port = new QComboBox(m_contextPanel);
     m_port->setObjectName(QStringLiteral("serialPort"));
-    m_baud = new QSpinBox(transportState);
+    contextLayout->addWidget(m_port);
+    contextLayout->addWidget(new QLabel(tr("波特率"), m_contextPanel));
+    m_baud = new QSpinBox(m_contextPanel);
     m_baud->setObjectName(QStringLiteral("serialBaud"));
     m_baud->setRange(300, 12000000);
     m_baud->setValue(115200);
     m_baud->setSingleStep(9600);
-    m_engine = new QComboBox(transportState);
+    contextLayout->addWidget(m_baud);
+    contextLayout->addWidget(new QLabel(tr("解析引擎"), m_contextPanel));
+    m_engine = new QComboBox(m_contextPanel);
     m_engine->setObjectName(QStringLiteral("serialEngine"));
     m_engine->addItem(QStringLiteral("Delimited numeric"), QStringLiteral("delimited"));
     m_engine->addItem(QStringLiteral("Raw text"), QStringLiteral("raw"));
-    m_scan = new QPushButton(tr("扫描"), transportState);
-    m_state = new QLabel(tr("未连接"), transportState);
-    m_state->setObjectName(QStringLiteral("statusPill"));
-    m_connect = new QPushButton(tr("连接"), transportState);
+    contextLayout->addWidget(m_engine);
+    auto *actions = new QHBoxLayout;
+    m_scan = new QPushButton(tr("扫描"), m_contextPanel);
+    m_connect = new QPushButton(tr("连接"), m_contextPanel);
     m_connect->setProperty("kind", QStringLiteral("primary"));
+    actions->addWidget(m_scan);
+    actions->addWidget(m_connect, 1);
+    contextLayout->addLayout(actions);
+    m_state = new QLabel(tr("未连接"), m_contextPanel);
+    m_state->setObjectName(QStringLiteral("statusPill"));
+    contextLayout->addWidget(m_state);
+    contextLayout->addStretch();
+
+    m_uiProvider = new WorkspaceUiProvider(this);
 
     auto *plotPanel = new QFrame;
     plotPanel->setObjectName(QStringLiteral("panel"));
@@ -65,7 +90,8 @@ SerialScopeWorkspace::SerialScopeWorkspace(IHostServices *host, QWidget *parent)
     plotHeader->addStretch();
     plotHeader->addWidget(clear);
     plotLayout->addLayout(plotHeader);
-    m_waveform = new WaveformWidget;
+    m_waveform = static_cast<WaveformWidget *>(
+        createComponent(QStringLiteral("serial-scope.waveform"), nullptr));
     plotLayout->addWidget(m_waveform, 1);
     auto *channelPanel = new QFrame;
     channelPanel->setObjectName(QStringLiteral("panel"));
@@ -106,18 +132,59 @@ SerialScopeWorkspace::SerialScopeWorkspace(IHostServices *host, QWidget *parent)
     // Serial Scope is the host workspace itself.  Keep the canvas empty on
     // first open; waveform, channel and terminal views are optional
     // instances, not three fixed panels that compete with the host docks.
-    m_workspace = new tn160::WorkspaceCanvas(QStringLiteral("serial/serial-scope-v2"));
+    // Definition IDs are globally stable and provider-qualified. Preserve
+    // the existing waveform layout once while moving from the historical
+    // canvas-local "waveform" ID.
+    {
+        QSettings settings;
+        settings.beginGroup(QStringLiteral("serial/serial-scope-v2"));
+        constexpr auto oldId = "waveform";
+        constexpr auto newId = "serial-scope.waveform";
+        for (const QString &field : {QStringLiteral("geometry"),
+                                     QStringLiteral("zOrder"),
+                                     QStringLiteral("visible")}) {
+            const QString oldKey = QStringLiteral("components/%1/%2")
+                .arg(QString::fromLatin1(oldId), field);
+            const QString newKey = QStringLiteral("components/%1/%2")
+                .arg(QString::fromLatin1(newId), field);
+            if (settings.contains(oldKey) && !settings.contains(newKey)) {
+                settings.setValue(newKey, settings.value(oldKey));
+            }
+        }
+        settings.endGroup();
+    }
+    m_workspace = new WorkspaceCanvas(QStringLiteral("serial/serial-scope-v2"));
+    const bool restoreComponentLayout = m_workspace->hasStoredLayout();
     m_workspace->setProperty("emptyTitle", tr("Serial Scope"));
     m_workspace->setProperty("emptyHint", tr("从组件库添加实时波形、数据通道或串口终端"));
-    m_workspace->addComponent(QStringLiteral("waveform"), tr("实时波形"), plotPanel,
+    m_workspace->addComponent(QStringLiteral("serial-scope.waveform"),
+                              tr("实时波形"), plotPanel,
                               QRectF(0.018, 0.028, 0.690, 0.560), QSize(360, 210));
     m_workspace->addComponent(QStringLiteral("channels"), tr("数据通道"), channelPanel,
                               QRectF(0.720, 0.028, 0.262, 0.560), QSize(180, 210));
     m_workspace->addComponent(QStringLiteral("terminal"), tr("串口终端"), terminalPanel,
                               QRectF(0.018, 0.642, 0.964, 0.330), QSize(520, 130));
-    m_workspace->setComponentVisible(QStringLiteral("waveform"), false);
-    m_workspace->setComponentVisible(QStringLiteral("channels"), false);
-    m_workspace->setComponentVisible(QStringLiteral("terminal"), false);
+    if (!restoreComponentLayout) {
+        m_workspace->setComponentVisible(QStringLiteral("serial-scope.waveform"), false);
+        m_workspace->setComponentVisible(QStringLiteral("channels"), false);
+        m_workspace->setComponentVisible(QStringLiteral("terminal"), false);
+    }
+
+    WorkspaceUiContext uiContext;
+    uiContext.id = QStringLiteral("serial");
+    uiContext.contextPanel = {m_contextPanel, tr("设备连接"), nullptr, {}};
+    uiContext.componentLibrary.items = {
+        {QStringLiteral("serial-scope.waveform"), tr("实时波形"),
+         QStringLiteral(":/serein/waveform.svg")},
+        {QStringLiteral("channels"), tr("数据通道"),
+         QStringLiteral(":/serein/channels.svg")},
+        {QStringLiteral("terminal"), tr("串口终端"),
+         QStringLiteral(":/serein/terminal.svg")},
+    };
+    uiContext.componentLibrary.activationTarget = this;
+    uiContext.componentLibrary.activationMethod =
+        QByteArrayLiteral("activateLibraryComponent");
+    m_uiProvider->setContext(std::move(uiContext));
 
     root->addWidget(m_workspace, 1);
 
@@ -128,14 +195,23 @@ SerialScopeWorkspace::SerialScopeWorkspace(IHostServices *host, QWidget *parent)
     connect(m_command, &QLineEdit::returnPressed, this, &SerialScopeWorkspace::sendCommand);
     connect(m_channels, &QListWidget::itemChanged,
             this, &SerialScopeWorkspace::channelVisibilityChanged);
-    connect(&m_transport, &SerialTransport::stateChanged,
+    connect(&m_session, &SerialDataSession::stateChanged,
             this, &SerialScopeWorkspace::handleState);
-    connect(&m_transport, &SerialTransport::dataReceived,
-            this, &SerialScopeWorkspace::handleData);
-    connect(&m_transport, &SerialTransport::errorOccurred,
-            this, &SerialScopeWorkspace::handleError);
-    connect(&m_transport, &SerialTransport::bytesWritten,
+    connect(&m_session, &SerialDataSession::packetsDecoded,
+            this, &SerialScopeWorkspace::handleDecodedPackets);
+    connect(&m_session, &SerialDataSession::decoderProgressChanged,
+            this, &SerialScopeWorkspace::handleDecoderProgress);
+    connect(&m_session, &SerialDataSession::errorOccurred,
+            this, &SerialScopeWorkspace::handleDecoderError);
+    connect(&m_session, &SerialDataSession::bytesReceived,
+            this, &SerialScopeWorkspace::handleBytesReceived);
+    connect(&m_session, &SerialDataSession::bytesWritten,
             this, &SerialScopeWorkspace::handleBytesWritten);
+    m_uiFlush.setSingleShot(true);
+    m_uiFlush.setInterval(50);
+    m_uiFlush.setTimerType(Qt::PreciseTimer);
+    connect(&m_uiFlush, &QTimer::timeout,
+            this, &SerialScopeWorkspace::flushPendingUi);
 
     rebuildDecoder();
     refreshPorts();
@@ -143,9 +219,64 @@ SerialScopeWorkspace::SerialScopeWorkspace(IHostServices *host, QWidget *parent)
 
 void SerialScopeWorkspace::shutdown()
 {
+    if (m_shuttingDown) return;
+    m_shuttingDown = true;
+    m_uiFlush.stop();
+    m_pendingSamples.clear();
+    m_pendingTerminalLines.clear();
     m_pendingTransmitCommands.clear();
     m_connected = false;
-    m_transport.close();
+    m_session.shutdown();
+}
+
+WorkspaceUiProvider *SerialScopeWorkspace::workspaceUiProvider()
+{
+    return m_uiProvider;
+}
+
+QList<WorkspaceComponentDefinition> SerialScopeWorkspace::componentDefinitions() const
+{
+    const WorkspaceComponentCapabilities commonCapabilities =
+        WorkspaceComponentCapability::Movable
+        | WorkspaceComponentCapability::Resizable
+        | WorkspaceComponentCapability::Maximizable
+        | WorkspaceComponentCapability::PropertyEditing;
+    return {
+        {
+            .definitionId = QStringLiteral("serial-scope.waveform"),
+            .providerId = QStringLiteral("serial-scope"),
+            .displayName = tr("实时波形"),
+            .category = tr("数据可视化"),
+            .iconSource = QStringLiteral(":/serein/waveform.svg"),
+            .defaultSize = QSize(640, 320),
+            .minimumSize = QSize(360, 210),
+            .capabilities = commonCapabilities
+                | WorkspaceComponentCapability::DataBinding,
+            .bindingKinds = WorkspaceBindingKind::SampleChannel,
+            .properties = {
+                {QStringLiteral("lineWidth"), tr("线宽"), QStringLiteral("double"),
+                 1.35, {{QStringLiteral("min"), 0.5}, {QStringLiteral("max"), 4.0}}},
+            },
+        },
+    };
+}
+
+QWidget *SerialScopeWorkspace::createComponent(const QString &definitionId,
+                                                QWidget *parent)
+{
+    const QString id = definitionId.trimmed();
+    if (id == QStringLiteral("serial-scope.waveform")) {
+        auto *waveform = new WaveformWidget(parent);
+        m_waveformViews.append(waveform);
+        return waveform;
+    }
+    return nullptr;
+}
+
+bool SerialScopeWorkspace::activateLibraryComponent(const QString &componentId)
+{
+    return m_workspace
+        && m_workspace->addOrShowComponentAt(componentId, QPoint(-1, -1));
 }
 
 void SerialScopeWorkspace::refreshPorts()
@@ -170,8 +301,8 @@ void SerialScopeWorkspace::refreshPorts()
 
 void SerialScopeWorkspace::toggleConnection()
 {
-    if (m_transport.isActive()) {
-        m_transport.close();
+    if (m_session.isActive()) {
+        m_session.close();
         return;
     }
     if (m_port->currentText().isEmpty()) {
@@ -182,7 +313,7 @@ void SerialScopeWorkspace::toggleConnection()
     clearData();
     m_totalBytes = 0;
     m_rateTimer.restart();
-    m_transport.open({m_port->currentText(), m_baud->value()});
+    m_session.open({m_port->currentText(), m_baud->value()});
 }
 
 void SerialScopeWorkspace::setPort(const QString &port)
@@ -210,7 +341,22 @@ int SerialScopeWorkspace::baudRate() const noexcept
 
 bool SerialScopeWorkspace::connectionActive() const noexcept
 {
-    return m_transport.isActive();
+    return m_session.isActive();
+}
+
+quint64 SerialScopeWorkspace::uiFlushCount() const noexcept
+{
+    return m_uiFlushCount;
+}
+
+quint64 SerialScopeWorkspace::coalescedUiSamples() const noexcept
+{
+    return m_coalescedUiSamples;
+}
+
+quint64 SerialScopeWorkspace::coalescedTerminalLines() const noexcept
+{
+    return m_totalCoalescedTerminalLines;
 }
 
 void SerialScopeWorkspace::setEngine(const QString &engine)
@@ -267,24 +413,51 @@ void SerialScopeWorkspace::handleState(const QString &state)
 
 void SerialScopeWorkspace::handleData(const QByteArray &data)
 {
-    m_totalBytes += data.size();
-    try {
-        const PacketList packets = m_decoder->feed(QByteArrayView(data));
-        for (const Packet &packet : packets) {
-            appendPacket(packet);
-        }
-    } catch (const std::exception &error) {
-        m_decoder->reset();
-        handleError(QString::fromUtf8(error.what()));
+    if (m_shuttingDown) return;
+    m_session.ingest(data);
+}
+
+void SerialScopeWorkspace::handleBytesReceived(const qint64 count)
+{
+    if (m_shuttingDown || count <= 0) return;
+    m_totalBytes += count;
+    updateRate(m_session.snapshot().decoder.decoderPendingBytes);
+}
+
+void SerialScopeWorkspace::handleDecodedPackets(const PacketList &packets)
+{
+    if (m_shuttingDown) return;
+    for (const Packet &packet : packets) appendPacket(packet);
+    if ((!m_pendingSamples.isEmpty() || !m_pendingTerminalLines.isEmpty())
+        && !m_uiFlush.isActive()) {
+        m_uiFlush.start();
     }
+}
+
+void SerialScopeWorkspace::handleDecoderProgress(const qsizetype pendingBytes)
+{
+    if (m_shuttingDown) return;
+    updateRate(pendingBytes);
+}
+
+void SerialScopeWorkspace::handleDecoderError(const QString &message)
+{
+    if (m_shuttingDown) return;
+    handleError(message);
+}
+
+void SerialScopeWorkspace::updateRate(const qsizetype pendingBytes)
+{
     const double seconds = std::max(m_rateTimer.elapsed() / 1000.0, 0.001);
     m_rate->setText(tr("%1 B/s  ·  buffer %2 B")
                         .arg(m_totalBytes / seconds, 0, 'f', 0)
-                        .arg(m_decoder->pendingBytes()));
+                        .arg(pendingBytes));
 }
 
 void SerialScopeWorkspace::handleError(const QString &message)
 {
+    if (m_shuttingDown) return;
+    m_session.resetDecoder();
     m_connected = false;
     setStatePill(QStringLiteral("error"), tr("错误"));
     m_terminal->appendPlainText(tr("ERROR  %1").arg(message));
@@ -305,7 +478,7 @@ void SerialScopeWorkspace::sendCommand()
     if (command.isEmpty()) {
         return;
     }
-    if (!m_connected || !m_transport.isActive()) {
+    if (!m_connected || !m_session.isActive()) {
         handleError(tr("请先连接串口，再发送命令"));
         return;
     }
@@ -316,7 +489,7 @@ void SerialScopeWorkspace::sendCommand()
         payload.append("\r\n");
     }
     m_pendingTransmitCommands.enqueue({command, payload.size()});
-    m_transport.write(payload);
+    m_session.write(payload);
     m_command->clear();
 }
 
@@ -335,13 +508,25 @@ void SerialScopeWorkspace::handleBytesWritten(const qint64 count)
 
 void SerialScopeWorkspace::channelVisibilityChanged(QListWidgetItem *item)
 {
-    m_waveform->setChannelVisible(item->data(Qt::UserRole).toInt(),
-                                  item->checkState() == Qt::Checked);
+    const int index = item->data(Qt::UserRole).toInt();
+    const bool visible = item->checkState() == Qt::Checked;
+    for (const QPointer<WaveformWidget> &waveform : std::as_const(m_waveformViews)) {
+        if (waveform) waveform->setChannelVisible(index, visible);
+    }
 }
 
 void SerialScopeWorkspace::clearData()
 {
-    m_waveform->clear();
+    m_uiFlush.stop();
+    m_pendingSamples.clear();
+    m_pendingTerminalLines.clear();
+    m_coalescedTerminalLines = 0;
+    m_totalCoalescedTerminalLines = 0;
+    m_coalescedUiSamples = 0;
+    m_uiFlushCount = 0;
+    for (const QPointer<WaveformWidget> &waveform : std::as_const(m_waveformViews)) {
+        if (waveform) waveform->clear();
+    }
     m_channels->clear();
     m_terminal->clear();
 }
@@ -354,7 +539,10 @@ void SerialScopeWorkspace::rebuildDecoder()
     } else {
         engine = std::make_unique<DelimitedEngine>();
     }
-    m_decoder = std::make_unique<BufferedDecoder>(std::move(engine));
+    QString error;
+    if (!m_session.replaceEngine(std::move(engine), &error)) {
+        handleError(error);
+    }
 }
 
 void SerialScopeWorkspace::syncChannels(const SamplePacket &sample)
@@ -381,21 +569,63 @@ void SerialScopeWorkspace::syncChannels(const SamplePacket &sample)
 void SerialScopeWorkspace::appendPacket(const Packet &packet)
 {
     if (const auto *sample = std::get_if<SamplePacket>(&packet)) {
-        m_waveform->addSample(sample->values, sample->labels);
-        syncChannels(*sample);
+        m_pendingSamples.enqueue(*sample);
+        while (m_pendingSamples.size() > MaxPendingSamples) {
+            m_pendingSamples.dequeue();
+            ++m_coalescedUiSamples;
+        }
         QStringList values;
         for (const double value : sample->values) {
             values.append(QString::number(value, 'g', 7));
         }
-        m_terminal->appendPlainText(QStringLiteral("RX  %1").arg(values.join(QStringLiteral("  "))));
+        m_pendingTerminalLines.append(
+            QStringLiteral("RX  %1").arg(values.join(QStringLiteral("  "))));
     } else if (const auto *text = std::get_if<TextPacket>(&packet)) {
-        const QString line = QStringLiteral("RX  %1").arg(text->text.trimmed());
-        m_terminal->appendPlainText(line);
+        m_pendingTerminalLines.append(
+            QStringLiteral("RX  %1").arg(text->text.trimmed()));
     } else if (const auto *event = std::get_if<EventPacket>(&packet)) {
         if (m_host) {
             m_host->log(event->level, event->message);
         }
     }
+    while (m_pendingTerminalLines.size() > MaxPendingTerminalLines) {
+        m_pendingTerminalLines.removeFirst();
+        ++m_coalescedTerminalLines;
+        ++m_totalCoalescedTerminalLines;
+    }
+}
+
+void SerialScopeWorkspace::flushPendingUi()
+{
+    if (m_shuttingDown) return;
+    ++m_uiFlushCount;
+    if (m_pendingSamples.size() > 1) {
+        m_coalescedUiSamples += quint64(m_pendingSamples.size() - 1);
+    }
+    std::optional<SamplePacket> latest;
+    while (!m_pendingSamples.isEmpty()) {
+        SamplePacket sample = std::move(m_pendingSamples.head());
+        m_pendingSamples.dequeue();
+        for (const QPointer<WaveformWidget> &waveform : std::as_const(m_waveformViews)) {
+            if (waveform) waveform->addSample(sample.values, sample.labels, false);
+        }
+        latest = std::move(sample);
+    }
+    if (latest) {
+        syncChannels(*latest);
+        for (const QPointer<WaveformWidget> &waveform : std::as_const(m_waveformViews)) {
+            if (waveform) waveform->refreshDisplay();
+        }
+    }
+
+    QStringList lines = std::move(m_pendingTerminalLines);
+    m_pendingTerminalLines.clear();
+    if (m_coalescedTerminalLines > 0) {
+        lines.prepend(tr("… 已合并 %1 条过快的显示日志，协议数据仍已完整解码")
+                          .arg(m_coalescedTerminalLines));
+        m_coalescedTerminalLines = 0;
+    }
+    if (!lines.isEmpty()) m_terminal->appendPlainText(lines.join(QLatin1Char('\n')));
 }
 
 void SerialScopeWorkspace::setStatePill(const QString &state, const QString &text)

@@ -6,10 +6,12 @@
 #include <QtCore/QDir>
 #include <QtCore/QEvent>
 #include <QtCore/QFile>
+#include <QtCore/QFileInfo>
 #include <QtCore/QHash>
 #include <QtCore/QMimeData>
 #include <QtCore/QMetaObject>
 #include <QtCore/QSettings>
+#include <QtCore/QSet>
 #include <QtCore/QSignalBlocker>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QTime>
@@ -25,12 +27,12 @@
 #include <QtGui/QPixmap>
 #include <QtGui/QPaintEvent>
 #include <QtGui/QRegion>
+#include <QtGui/QResizeEvent>
 #include <QtGui/QWindow>
-#include <serein/scope/SerialTransport.h>
-#include <QtWidgets/QComboBox>
+#include <serein/scope/BackendRuntime.h>
+#include <serein/scope/WorkspaceCanvas.h>
 #include <QtWidgets/QAbstractItemView>
 #include <QtWidgets/QDockWidget>
-#include <QtWidgets/QAbstractSpinBox>
 #include <QtWidgets/QButtonGroup>
 #include <QtWidgets/QBoxLayout>
 #include <QtWidgets/QFileDialog>
@@ -46,7 +48,6 @@
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QScrollArea>
-#include <QtWidgets/QSpinBox>
 #include <QtWidgets/QStackedWidget>
 #include <QtWidgets/QStatusBar>
 #include <QtWidgets/QTabBar>
@@ -61,14 +62,29 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 
 namespace serein::scope::app {
 namespace {
 
 const QString HomeId = QStringLiteral("__home__");
 const QString ComponentsId = QStringLiteral("__components__");
+const QString LastActivePageSettingsKey = QStringLiteral("main/last-active-page-v1");
+const QString LastComponentImportDirectoryKey =
+    QStringLiteral("components/last-import-directory-v1");
 const QString DockSettingsKey = QStringLiteral("main/docks-v15-output-clear-connection-right");
 const QString CentralDockSettingsKey = QStringLiteral("main/central-dock-v1");
+const QString PageLayoutSettingsGroup = QStringLiteral("main/page-layout-v1");
+const QString EqualSidePanelWidthMigrationKey =
+    QStringLiteral("main/page-layout-equal-side-panel-width-v1");
+const QString MinimumSidePanelWidthMigrationKey =
+    QStringLiteral("main/page-layout-minimum-side-panel-width-v2");
+const QString Tn160LiveOutputFractionMigrationKey =
+    QStringLiteral("main/page-layout-tn160-live-output-fraction-v3");
+const QString Tn160NcmEqualPanelsMigrationKey =
+    QStringLiteral("main/page-layout-tn160-ncm-equal-panels-v1");
+const QString Tn160NcmOutputFractionMigrationKey =
+    QStringLiteral("main/page-layout-tn160-ncm-output-fraction-v2");
 constexpr int DockLayoutVersion = 15;
 constexpr int CentralDockLayoutVersion = 1;
 constexpr qreal WindowCornerRadius = 12.0;
@@ -408,7 +424,7 @@ QWidget *makeDockHeader(QDockWidget *dock, const QString &title)
 {
     auto *header = new QWidget(dock);
     header->setObjectName(QStringLiteral("dockHeader"));
-    header->setFixedHeight(30);
+    header->setFixedHeight(32);
     auto *layout = new QHBoxLayout(header);
     layout->setContentsMargins(10, 0, 5, 0);
     layout->setSpacing(2);
@@ -435,13 +451,99 @@ QWidget *makeDockHeader(QDockWidget *dock, const QString &title)
     return header;
 }
 
+struct DockPanelShell {
+    QWidget *surface = nullptr;
+    QWidget *header = nullptr;
+    QWidget *body = nullptr;
+    QVBoxLayout *bodyLayout = nullptr;
+};
+
+class RoundedBottomPanelBody final : public QWidget {
+public:
+    RoundedBottomPanelBody(QWidget *header, QWidget *parent = nullptr)
+        : QWidget(parent), m_header(header)
+    {
+        if (m_header) m_header->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (watched == m_header
+            && (event->type() == QEvent::Show || event->type() == QEvent::Hide)) {
+            m_clipTopCorners = event->type() == QEvent::Hide;
+            updateMask();
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QWidget::resizeEvent(event);
+        updateMask();
+    }
+
+private:
+    void updateMask()
+    {
+        if (width() <= 0 || height() <= 0) return;
+
+        constexpr qreal radius = 7.0;
+        const qreal effectiveRadius = std::min<qreal>(
+            radius, std::min<qreal>(width(), height()) / 2.0);
+        QPainterPath path;
+        path.moveTo(m_clipTopCorners ? effectiveRadius : 0.0, 0.0);
+        path.lineTo(m_clipTopCorners ? width() - effectiveRadius : width(), 0.0);
+        if (m_clipTopCorners) {
+            path.quadTo(width(), 0.0, width(), effectiveRadius);
+        }
+        path.lineTo(width(), height() - effectiveRadius);
+        path.quadTo(width(), height(), width() - effectiveRadius, height());
+        path.lineTo(effectiveRadius, height());
+        path.quadTo(0.0, height(), 0.0, height() - effectiveRadius);
+        if (m_clipTopCorners) {
+            path.lineTo(0.0, effectiveRadius);
+            path.quadTo(0.0, 0.0, effectiveRadius, 0.0);
+        }
+        path.closeSubpath();
+        setMask(QRegion(path.toFillPolygon().toPolygon()));
+    }
+
+    QPointer<QWidget> m_header;
+    bool m_clipTopCorners = false;
+};
+
+DockPanelShell makeDockPanelShell(QDockWidget *dock, const QString &title,
+                                  const char *slot)
+{
+    DockPanelShell shell;
+    shell.surface = new QWidget;
+    shell.surface->setObjectName(QStringLiteral("dockPanelContent"));
+    shell.surface->setProperty("workspacePanelSlot", slot);
+    auto *outer = new QVBoxLayout(shell.surface);
+    // Keep child paint one pixel inside the host-owned surface border.  QSS
+    // radii do not clip descendants, so a zero-inset body can overwrite the
+    // very edge that is supposed to define the shared 8 px component shape.
+    outer->setContentsMargins(1, 1, 1, 1);
+    outer->setSpacing(0);
+    shell.header = makeDockHeader(dock, title);
+    outer->addWidget(shell.header);
+    shell.body = new RoundedBottomPanelBody(shell.header, shell.surface);
+    shell.body->setObjectName(QStringLiteral("dockPanelBody"));
+    shell.bodyLayout = new QVBoxLayout(shell.body);
+    shell.bodyLayout->setContentsMargins(0, 0, 0, 0);
+    shell.bodyLayout->setSpacing(0);
+    outer->addWidget(shell.body, 1);
+    return shell;
+}
+
 void installFloatingDockChrome(QDockWidget *dock, QWidget *innerHeader,
                                QWidget *collapsedTitleBar, const QString &title)
 {
     if (!dock || !innerHeader || !collapsedTitleBar) return;
     auto *floatingHeader = new QWidget(dock);
     floatingHeader->setObjectName(QStringLiteral("dockFloatingTitleBar"));
-    floatingHeader->setFixedHeight(30);
+    floatingHeader->setFixedHeight(32);
     auto *layout = new QHBoxLayout(floatingHeader);
     layout->setContentsMargins(10, 0, 5, 0);
     layout->setSpacing(2);
@@ -494,7 +596,7 @@ void clearGrid(QGridLayout *grid)
 } // namespace
 
 MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent)
+    : QMainWindow(parent), m_componentRegistry(this)
 {
     setWindowFlag(Qt::FramelessWindowHint, true);
     setAttribute(Qt::WA_TranslucentBackground, true);
@@ -504,6 +606,11 @@ MainWindow::MainWindow(QWidget *parent)
     setMouseTracking(true);
     qApp->installEventFilter(this);
     setDockOptions(QMainWindow::AllowNestedDocks | QMainWindow::AnimatedDocks);
+    connect(&BackendRuntime::instance(), &BackendRuntime::runtimeError,
+            this, [this](const QString &message) {
+        log(QStringLiteral("error"), tr("后台运行错误：%1").arg(message));
+        setStatus(tr("后台运行错误 · %1").arg(message));
+    });
 
     prepareComponents();
     buildCentralShell();
@@ -511,7 +618,8 @@ MainWindow::MainWindow(QWidget *parent)
     buildDocks();
     buildMenu();
     connect(m_components, &ComponentManager::componentsChanged,
-            this, &MainWindow::refreshComponentUi);
+            this, &MainWindow::refreshComponentUi,
+            Qt::QueuedConnection);
 
     for (const QString &entry : std::as_const(m_pendingLogs)) {
         m_output->appendPlainText(entry);
@@ -529,16 +637,74 @@ MainWindow::MainWindow(QWidget *parent)
         }
     }
     if (!explicitPage) {
-        for (const ComponentSnapshot &component : m_components->components()) {
-            if (component.loaded) {
-                initialPage = component.metadata.id;
-                break;
-            }
+        const QString savedPage = QSettings().value(
+            LastActivePageSettingsKey, HomeId).toString();
+        if (savedPage == HomeId || savedPage == ComponentsId
+            || m_components->isLoaded(savedPage)) {
+            initialPage = savedPage;
         }
     }
     activatePage(initialPage);
+    if (m_activePage.isEmpty()) activatePage(HomeId);
 
     QSettings settings;
+    if (!settings.value(EqualSidePanelWidthMigrationKey, false).toBool()) {
+        const QStringList contexts{
+            QStringLiteral("serial"),
+            QStringLiteral("tn160/firmware"),
+            QStringLiteral("tn160/live"),
+            QStringLiteral("tn160/engineering-calibration"),
+            QStringLiteral("tn160/calibration-data"),
+            QStringLiteral("tn160/production-calibration"),
+        };
+        for (const QString &context : contexts) {
+            settings.remove(PageLayoutSettingsGroup + QLatin1Char('/') + context
+                            + QStringLiteral("/inspectorWidth"));
+        }
+        settings.setValue(EqualSidePanelWidthMigrationKey, true);
+    }
+    if (!settings.value(MinimumSidePanelWidthMigrationKey, false).toBool()) {
+        const QStringList contexts{
+            QStringLiteral("serial"),
+            QStringLiteral("tn160/firmware"),
+            QStringLiteral("tn160/live"),
+            QStringLiteral("tn160/engineering-calibration"),
+            QStringLiteral("tn160/calibration-data"),
+            QStringLiteral("tn160/production-calibration"),
+        };
+        for (const QString &context : contexts) {
+            const QString key = PageLayoutSettingsGroup + QLatin1Char('/') + context
+                + QStringLiteral("/inspectorWidth");
+            if (settings.value(key, -1).toInt() == SidePanelMinimumWidth) {
+                settings.remove(key);
+            }
+        }
+        settings.setValue(MinimumSidePanelWidthMigrationKey, true);
+    }
+    if (!settings.value(Tn160LiveOutputFractionMigrationKey, false).toBool()) {
+        const QString outputFractionKey = PageLayoutSettingsGroup
+            + QStringLiteral("/tn160/live/outputFraction");
+        if (settings.contains(outputFractionKey)
+            && std::abs(settings.value(outputFractionKey).toDouble() - 0.42) < 0.015) {
+            settings.remove(outputFractionKey);
+        }
+        settings.setValue(Tn160LiveOutputFractionMigrationKey, true);
+    }
+    if (!settings.value(Tn160NcmEqualPanelsMigrationKey, false).toBool()) {
+        const QString inspectorWidthKey = PageLayoutSettingsGroup
+            + QStringLiteral("/tn160/firmware-calibration/inspectorWidth");
+        settings.remove(inspectorWidthKey);
+        settings.setValue(Tn160NcmEqualPanelsMigrationKey, true);
+    }
+    if (!settings.value(Tn160NcmOutputFractionMigrationKey, false).toBool()) {
+        const QString outputFractionKey = PageLayoutSettingsGroup
+            + QStringLiteral("/tn160/firmware-calibration/outputFraction");
+        if (settings.contains(outputFractionKey)
+            && std::abs(settings.value(outputFractionKey).toDouble() - 0.60) < 0.015) {
+            settings.remove(outputFractionKey);
+        }
+        settings.setValue(Tn160NcmOutputFractionMigrationKey, true);
+    }
     restoreGeometry(settings.value(QStringLiteral("main/geometry")).toByteArray());
     const QByteArray dockState = settings.value(DockSettingsKey).toByteArray();
     const QByteArray centralDockState = settings.value(CentralDockSettingsKey).toByteArray();
@@ -549,6 +715,8 @@ MainWindow::MainWindow(QWidget *parent)
                                                    CentralDockLayoutVersion)) {
         applyDefaultDockLayout();
     }
+    m_pageLayoutsReady = true;
+    switchPageLayoutContext();
     if (QCoreApplication::arguments().contains(QStringLiteral("--dark"))) {
         applyDarkMode(true);
     }
@@ -567,9 +735,10 @@ MainWindow::MainWindow(QWidget *parent)
         m_outputDock->show();
         QTimer::singleShot(180, this, [this] {
             if (!m_workbenchWindow) return;
-            m_workbenchWindow->resizeDocks({m_navigationDock}, {220}, Qt::Horizontal);
-            m_workbenchWindow->resizeDocks({m_inspectorDock}, {220}, Qt::Horizontal);
-            m_centerWorkbenchWindow->resizeDocks({m_outputDock}, {156}, Qt::Vertical);
+            m_workbenchWindow->resizeDocks(
+                {m_navigationDock, m_inspectorDock},
+                {SidePanelDefaultWidth, SidePanelDefaultWidth}, Qt::Horizontal);
+            resizeOutputDockForCurrentPage();
         });
     }
 }
@@ -577,6 +746,8 @@ MainWindow::MainWindow(QWidget *parent)
 MainWindow::~MainWindow()
 {
     qApp->removeEventFilter(this);
+    if (m_pageLayoutsReady) savePageLayout(m_pageLayoutContext);
+    detachWorkspacePanels();
     QSettings settings;
     settings.setValue(QStringLiteral("main/geometry"), saveGeometry());
     if (m_workbenchWindow) {
@@ -586,6 +757,14 @@ MainWindow::~MainWindow()
     if (m_centerWorkbenchWindow) {
         settings.setValue(CentralDockSettingsKey,
                           m_centerWorkbenchWindow->saveState(CentralDockLayoutVersion));
+    }
+
+    // QMainWindow hides child docks from its base-class destructor, after
+    // MainWindow's QString/state members have already been destroyed.  Do
+    // not let those late visibilityChanged signals re-enter layout saving.
+    for (QDockWidget *dock : {m_navigationDock, m_componentLibraryDock,
+                              m_outputDock, m_inspectorDock}) {
+        if (dock) disconnect(dock, nullptr, this, nullptr);
     }
 
     disconnect(m_components, nullptr, this, nullptr);
@@ -607,10 +786,99 @@ bool MainWindow::runComponentCycleTest(const QString &componentId, QString *erro
         m_components->unload(componentId, nullptr, false);
         return false;
     }
+
+    const auto rejectWorkspace = [this, workspace, componentId, error](
+                                      const QString &reason) {
+        if (error) *error = reason;
+        if (auto *managed = qobject_cast<IDeviceWorkspace *>(workspace)) {
+            managed->shutdown();
+        }
+        delete workspace;
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        m_components->unload(componentId, nullptr, false);
+        return false;
+    };
+    QString contractError;
+    if (!validateWorkspaceContract(workspace, &contractError)) {
+        return rejectWorkspace(contractError);
+    }
     if (auto *managed = qobject_cast<IDeviceWorkspace *>(workspace)) managed->shutdown();
     delete workspace;
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
     return m_components->unload(componentId, error, false);
+}
+
+bool MainWindow::validateWorkspaceContract(QWidget *workspace, QString *error) const
+{
+    const auto reject = [error](const QString &reason) {
+        if (error) *error = reason;
+        return false;
+    };
+    if (!workspace) return reject(tr("插件工作区为空"));
+    if (qobject_cast<QDockWidget *>(workspace)
+        || qobject_cast<QMainWindow *>(workspace)
+        || workspace->findChild<QDockWidget *>()
+        || workspace->findChild<QMainWindow *>()) {
+        return reject(
+            tr("组件工作区创建了自己的 Dock/主窗口；外围面板必须由宿主模板持有"));
+    }
+
+    auto *contributor = qobject_cast<IWorkspaceUiProvider *>(workspace);
+    if (!contributor) return true;
+    WorkspaceUiProvider *provider = contributor->workspaceUiProvider();
+    if (!provider || provider->context().id.trimmed().isEmpty()) {
+        return reject(tr("组件 UI Provider 缺少稳定的上下文 ID"));
+    }
+
+    const WorkspaceUiContext &context = provider->context();
+    const QList<WorkspacePanelPresentation> presentations{
+        context.contextPanel,
+        context.inspectorPanel,
+        context.outputPanel,
+    };
+    QSet<QWidget *> uniquePanels;
+    for (const WorkspacePanelPresentation &panel : presentations) {
+        if (!panel.content) continue;
+        if (panel.content != workspace && !workspace->isAncestorOf(panel.content)) {
+            return reject(
+                tr("组件面板内容不属于工作区生命周期：%1")
+                    .arg(panel.content->objectName()));
+        }
+        if (uniquePanels.contains(panel.content)) {
+            return reject(tr("多个宿主面板槽复用了同一个内容控件"));
+        }
+        QWidget *panelOwner = panel.content->parentWidget();
+        if (panelOwner && panelOwner->layout()
+            && panelOwner->layout()->indexOf(panel.content) >= 0) {
+            return reject(
+                tr("宿主面板贡献根控件必须是组件持有的独立内容，不能同时占用组件内部布局"));
+        }
+        uniquePanels.insert(panel.content);
+    }
+
+    const WorkspaceUiPresentationOptions presentationOptions =
+        provider->presentationOptions();
+    const QList<WorkspacePanelOptions> panelOptions{
+        presentationOptions.contextPanel,
+        presentationOptions.inspectorPanel,
+        presentationOptions.outputPanel,
+    };
+    for (qsizetype index = 0; index < presentations.size(); ++index) {
+        const WorkspacePanelPresentation &panel = presentations.at(index);
+        QWidget *headerControl = panelOptions.at(index).headerControl;
+        if (!headerControl) continue;
+        if (!panel.content || headerControl == panel.content
+            || !panel.content->isAncestorOf(headerControl)) {
+            return reject(tr("面板 Header 控件不属于对应内容的生命周期"));
+        }
+        QWidget *headerOwner = headerControl->parentWidget();
+        auto *ownerLayout = headerOwner
+            ? qobject_cast<QBoxLayout *>(headerOwner->layout()) : nullptr;
+        if (!ownerLayout || ownerLayout->indexOf(headerControl) < 0) {
+            return reject(tr("面板 Header 控件必须位于组件自有的顺序布局中"));
+        }
+    }
+    return true;
 }
 
 void MainWindow::prepareComponents()
@@ -623,9 +891,9 @@ void MainWindow::prepareComponents()
     }
     m_components = new ComponentManager(this, storePath, true, this);
     m_components->discover();
-    QDir packagedComponents(QCoreApplication::applicationDirPath());
-    packagedComponents.cdUp();
-    if (packagedComponents.cd(QStringLiteral("Components"))) {
+    const QString packagedPath = ComponentManager::packagedStorePath();
+    QDir packagedComponents(packagedPath);
+    if (!packagedPath.isEmpty()) {
         const QFileInfoList packages = packagedComponents.entryInfoList(
             {QStringLiteral("*.sscomponent")}, QDir::Files, QDir::Name);
         for (const QFileInfo &package : packages) {
@@ -825,283 +1093,42 @@ void MainWindow::buildGlobalBar()
 
 QWidget *MainWindow::buildNavigationPanel()
 {
-    auto *panel = new QFrame;
-    panel->setObjectName(QStringLiteral("contextPanel"));
-    panel->setMinimumWidth(165);
-    auto *panelLayout = new QVBoxLayout(panel);
-    panelLayout->setContentsMargins(14, 14, 14, 12);
-    panelLayout->setSpacing(10);
-    panelLayout->addWidget(makeDockHeader(m_navigationDock, tr("设备连接")));
+    const DockPanelShell shell = makeDockPanelShell(
+        m_navigationDock, tr("设备连接"), "context");
+    QWidget *panel = shell.surface;
+    panel->setMinimumWidth(SidePanelMinimumWidth);
+    panel->setMaximumWidth(SidePanelMaximumWidth);
 
-    m_connectionModeStack = new QStackedWidget(panel);
-    m_connectionModeStack->setObjectName(QStringLiteral("connectionModeStack"));
-    auto *connectionPage = new QWidget(m_connectionModeStack);
-    auto *connectionLayout = new QVBoxLayout(connectionPage);
-    connectionLayout->setContentsMargins(0, 0, 0, 0);
-    connectionLayout->setSpacing(8);
-    auto *connectionHint = new QLabel(tr("选择活动工作区后，在这里控制串口租约。"),
-                                      connectionPage);
-    connectionHint->setObjectName(QStringLiteral("panelHint"));
-    connectionHint->setWordWrap(true);
-    connectionLayout->addWidget(connectionHint);
+    m_contextContributionHost = new QWidget(shell.body);
+    m_contextContributionHost->setObjectName(QStringLiteral("workspaceContextHost"));
+    m_contextContributionLayout = new QVBoxLayout(m_contextContributionHost);
+    m_contextContributionLayout->setContentsMargins(0, 0, 0, 0);
+    m_contextContributionLayout->setSpacing(0);
+    m_contextContributionHost->hide();
+    shell.bodyLayout->addWidget(m_contextContributionHost, 1);
 
-    auto *portLabel = new QLabel(tr("端口"), connectionPage);
-    portLabel->setObjectName(QStringLiteral("fieldLabel"));
-    connectionLayout->addWidget(portLabel);
-    m_connectionPort = new QComboBox(connectionPage);
-    m_connectionPort->setObjectName(QStringLiteral("connectionPort"));
-    m_connectionPort->setPlaceholderText(tr("未发现串口"));
-    m_connectionPort->setEditable(true);
-    connectionLayout->addWidget(m_connectionPort);
+    m_contextFallback = new QLabel(
+        tr("打开设备工作区后，此处显示对应的连接与操作。"),
+        shell.body);
+    m_contextFallback->setObjectName(QStringLiteral("workspaceContextFallback"));
+    m_contextFallback->setWordWrap(true);
+    m_contextFallback->setAlignment(Qt::AlignCenter);
+    shell.bodyLayout->addWidget(m_contextFallback, 1);
 
-    m_connectionBaudLabel = new QLabel(tr("波特率"), connectionPage);
-    m_connectionBaudLabel->setObjectName(QStringLiteral("fieldLabel"));
-    connectionLayout->addWidget(m_connectionBaudLabel);
-    m_connectionBaud = new QSpinBox(connectionPage);
-    m_connectionBaud->setObjectName(QStringLiteral("connectionBaud"));
-    m_connectionBaud->setRange(300, 12000000);
-    m_connectionBaud->setValue(2000000);
-    m_connectionBaud->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    connectionLayout->addWidget(m_connectionBaud);
-
-    m_connectionTriggerBaudLabel = new QLabel(tr("触发波特率"), connectionPage);
-    m_connectionTriggerBaudLabel->setObjectName(QStringLiteral("fieldLabel"));
-    connectionLayout->addWidget(m_connectionTriggerBaudLabel);
-    m_connectionTriggerBaud = new QSpinBox(connectionPage);
-    m_connectionTriggerBaud->setObjectName(QStringLiteral("connectionTriggerBaud"));
-    m_connectionTriggerBaud->setRange(300, 12000000);
-    m_connectionTriggerBaud->setValue(2000000);
-    m_connectionTriggerBaud->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    connectionLayout->addWidget(m_connectionTriggerBaud);
-
-    m_connectionReadBaudLabel = new QLabel(tr("读取波特率"), connectionPage);
-    m_connectionReadBaudLabel->setObjectName(QStringLiteral("fieldLabel"));
-    connectionLayout->addWidget(m_connectionReadBaudLabel);
-    m_connectionReadBaud = new QSpinBox(connectionPage);
-    m_connectionReadBaud->setObjectName(QStringLiteral("connectionReadBaud"));
-    m_connectionReadBaud->setRange(300, 12000000);
-    m_connectionReadBaud->setValue(5000000);
-    m_connectionReadBaud->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    connectionLayout->addWidget(m_connectionReadBaud);
-
-    m_connectionEngineLabel = new QLabel(tr("数据引擎"), connectionPage);
-    m_connectionEngineLabel->setObjectName(QStringLiteral("fieldLabel"));
-    connectionLayout->addWidget(m_connectionEngineLabel);
-    m_connectionEngine = new QComboBox(connectionPage);
-    m_connectionEngine->setObjectName(QStringLiteral("connectionEngine"));
-    m_connectionEngine->addItem(tr("逗号分隔数值"), QStringLiteral("delimited"));
-    m_connectionEngine->addItem(tr("原始文本"), QStringLiteral("raw"));
-    connectionLayout->addWidget(m_connectionEngine);
-
-    auto *rawCaptureRow = new QHBoxLayout;
-    rawCaptureRow->setContentsMargins(0, 0, 0, 0);
-    rawCaptureRow->setSpacing(6);
-    m_tnRawFrameLabel = new QLabel(tr("原始帧"), connectionPage);
-    m_tnRawFrameLabel->setObjectName(QStringLiteral("fieldLabel"));
-    m_tnRawFrameCount = new QSpinBox(connectionPage);
-    m_tnRawFrameCount->setObjectName(QStringLiteral("tn160RawFrameCount"));
-    m_tnRawFrameCount->setRange(1, 256);
-    m_tnRawFrameCount->setValue(32);
-    m_tnRawFrameCount->setSuffix(tr(" 帧"));
-    m_tnRawCapture = new QPushButton(tr("采集原始帧"), connectionPage);
-    m_tnRawCapture->setObjectName(QStringLiteral("tn160RawCapture"));
-    m_tnRawCapture->setProperty("kind", QStringLiteral("quiet"));
-    rawCaptureRow->addWidget(m_tnRawFrameLabel);
-    rawCaptureRow->addWidget(m_tnRawFrameCount, 0);
-    rawCaptureRow->addWidget(m_tnRawCapture, 1);
-    connectionLayout->addLayout(rawCaptureRow);
-
-    auto *connectionActions = new QHBoxLayout;
-    connectionActions->setContentsMargins(0, 0, 0, 0);
-    connectionActions->setSpacing(6);
-    m_connectionScan = new QPushButton(tr("扫描串口"), connectionPage);
-    m_connectionScan->setProperty("kind", QStringLiteral("quiet"));
-    m_connectionToggle = new QPushButton(tr("连接"), connectionPage);
-    m_connectionToggle->setProperty("kind", QStringLiteral("primary"));
-    connectionActions->addWidget(m_connectionScan);
-    connectionActions->addWidget(m_connectionToggle, 1);
-    connectionLayout->addLayout(connectionActions);
-
-    m_connectionState = new QLabel(tr("未打开可连接工作区"), connectionPage);
-    m_connectionState->setObjectName(QStringLiteral("sessionState"));
-    connectionLayout->addWidget(m_connectionState, 0, Qt::AlignLeft);
-
-    auto *divider = new QFrame(connectionPage);
-    divider->setObjectName(QStringLiteral("panelDivider"));
-    divider->setFixedHeight(1);
-    connectionLayout->addSpacing(4);
-    connectionLayout->addWidget(divider);
-    auto *helpTitle = new QLabel(tr("工作区"), connectionPage);
-    helpTitle->setObjectName(QStringLiteral("panelHintTitle"));
-    auto *help = new QLabel(tr("顶部标签切换设备；TN160 内部功能在工作区页签中切换。"),
-                            connectionPage);
-    help->setObjectName(QStringLiteral("panelHint"));
-    help->setWordWrap(true);
-    connectionLayout->addWidget(helpTitle);
-    connectionLayout->addWidget(help);
-    connectionLayout->addStretch(1);
-    m_connectionModeStack->addWidget(connectionPage);
-
-    auto *firmwarePage = new QWidget(m_connectionModeStack);
-    firmwarePage->setObjectName(QStringLiteral("firmwareActionPanel"));
-    auto *firmwareLayout = new QVBoxLayout(firmwarePage);
-    firmwareLayout->setContentsMargins(0, 0, 0, 0);
-    firmwareLayout->setSpacing(8);
-    auto *firmwareTitle = new QLabel(tr("固件烧录"), firmwarePage);
-    firmwareTitle->setObjectName(QStringLiteral("connectionTitle"));
-    firmwareLayout->addWidget(firmwareTitle);
-    auto *firmwareHint = new QLabel(
-        tr("选择 UF2 后开始监听；只处理新出现且符合容量限制的 BOOTSEL 卷。"),
-        firmwarePage);
-    firmwareHint->setObjectName(QStringLiteral("panelHint"));
-    firmwareHint->setWordWrap(true);
-    firmwareLayout->addWidget(firmwareHint);
-    auto *firmwarePathLabel = new QLabel(tr("固件文件"), firmwarePage);
-    firmwarePathLabel->setObjectName(QStringLiteral("fieldLabel"));
-    firmwareLayout->addWidget(firmwarePathLabel);
-    m_firmwarePath = new QLabel(tr("尚未选择 UF2"), firmwarePage);
-    m_firmwarePath->setObjectName(QStringLiteral("firmwarePath"));
-    m_firmwarePath->setWordWrap(true);
-    m_firmwarePath->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    firmwareLayout->addWidget(m_firmwarePath);
-    auto *firmwareActions = new QHBoxLayout;
-    firmwareActions->setContentsMargins(0, 0, 0, 0);
-    firmwareActions->setSpacing(6);
-    m_firmwareChoose = new QPushButton(tr("选择 UF2"), firmwarePage);
-    m_firmwareChoose->setProperty("kind", QStringLiteral("quiet"));
-    m_firmwareMonitor = new QPushButton(tr("开始监听"), firmwarePage);
-    m_firmwareMonitor->setProperty("kind", QStringLiteral("primary"));
-    firmwareActions->addWidget(m_firmwareChoose);
-    firmwareActions->addWidget(m_firmwareMonitor, 1);
-    firmwareLayout->addLayout(firmwareActions);
-    m_firmwareState = new QLabel(tr("等待选择 UF2"), firmwarePage);
-    m_firmwareState->setObjectName(QStringLiteral("sessionState"));
-    firmwareLayout->addWidget(m_firmwareState, 0, Qt::AlignLeft);
-    firmwareLayout->addStretch(1);
-    m_connectionModeStack->addWidget(firmwarePage);
-    panelLayout->addWidget(m_connectionModeStack, 1);
-
-    m_navigation = new QListWidget(panel);
+    m_navigation = new QListWidget(shell.body);
     m_navigation->setObjectName(QStringLiteral("pluginNav"));
-    m_navigation->setVisible(false);
+    m_navigation->hide();
     connect(m_navigation, &QListWidget::currentItemChanged,
             this, &MainWindow::navigationChanged);
-    panelLayout->addWidget(m_navigation);
+    shell.bodyLayout->addWidget(m_navigation);
 
-    panelLayout->addStretch(1);
-    auto *version = new QLabel(QStringLiteral("SEREIN SCOPE  1.0.1   ·   ABI 2"), panel);
+    auto *version = new QLabel(QStringLiteral("SEREIN SCOPE  1.0.1   ·   ABI 2"),
+                                shell.body);
     version->setObjectName(QStringLiteral("panelVersion"));
-    panelLayout->addWidget(version);
-
-    connect(m_connectionScan, &QPushButton::clicked, this, &MainWindow::scanConnectionPorts);
-    connect(m_connectionToggle, &QPushButton::clicked,
-            this, &MainWindow::toggleConnection);
-    connect(m_connectionPort, &QComboBox::currentTextChanged, this, [this](const QString &port) {
-        QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
-        if (!workspace) return;
-        QObject *target = nullptr;
-        if (workspace->objectName() == QStringLiteral("serialScopeWorkspace")) {
-            target = workspace;
-        } else if (workspace->objectName() == QStringLiteral("instrumentWorkspace")) {
-            int page = -1;
-            QMetaObject::invokeMethod(workspace, "currentPageIndex", Qt::DirectConnection,
-                                      Q_RETURN_ARG(int, page));
-            const QString pageObject = page == 2 ? QStringLiteral("tn160CalibrationPage")
-                : page == 3 ? QStringLiteral("tn160CalibrationDataPage")
-                             : QStringLiteral("tn160LivePage");
-            target = workspace->findChild<QObject *>(pageObject);
-        }
-        if (target) QMetaObject::invokeMethod(target, "setPort", Qt::DirectConnection,
-                                               Q_ARG(QString, port));
-    });
-    connect(m_connectionBaud, &QSpinBox::valueChanged, this, [this](const int baud) {
-        QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
-        if (!workspace) return;
-        QObject *target = nullptr;
-        if (workspace->objectName() == QStringLiteral("serialScopeWorkspace")) {
-            target = workspace;
-        } else if (workspace->objectName() == QStringLiteral("instrumentWorkspace")) {
-            target = workspace->findChild<QObject *>(QStringLiteral("tn160LivePage"));
-        }
-        if (target) {
-            QMetaObject::invokeMethod(target, "setBaud", Qt::DirectConnection,
-                                      Q_ARG(int, baud));
-        }
-    });
-    connect(m_connectionTriggerBaud, &QSpinBox::valueChanged, this, [this](const int baud) {
-        QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
-        if (!workspace || workspace->objectName() != QStringLiteral("instrumentWorkspace")) return;
-        int page = -1;
-        QMetaObject::invokeMethod(workspace, "currentPageIndex", Qt::DirectConnection,
-                                  Q_RETURN_ARG(int, page));
-        const QString pageObject = page == 2 ? QStringLiteral("tn160CalibrationPage")
-            : page == 3 ? QStringLiteral("tn160CalibrationDataPage") : QString();
-        if (pageObject.isEmpty()) return;
-        if (QObject *target = workspace->findChild<QObject *>(pageObject)) {
-            QMetaObject::invokeMethod(target, "setTriggerBaud", Qt::DirectConnection,
-                                      Q_ARG(int, baud));
-        }
-    });
-    connect(m_connectionReadBaud, &QSpinBox::valueChanged, this, [this](const int baud) {
-        QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
-        if (!workspace || workspace->objectName() != QStringLiteral("instrumentWorkspace")) return;
-        int page = -1;
-        QMetaObject::invokeMethod(workspace, "currentPageIndex", Qt::DirectConnection,
-                                  Q_RETURN_ARG(int, page));
-        const QString pageObject = page == 2 ? QStringLiteral("tn160CalibrationPage")
-            : page == 3 ? QStringLiteral("tn160CalibrationDataPage") : QString();
-        if (pageObject.isEmpty()) return;
-        if (QObject *target = workspace->findChild<QObject *>(pageObject)) {
-            QMetaObject::invokeMethod(target, "setReadBaud", Qt::DirectConnection,
-                                      Q_ARG(int, baud));
-        }
-    });
-    connect(m_connectionEngine, qOverload<int>(&QComboBox::currentIndexChanged), this,
-            [this](const int index) {
-        QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
-        if (!workspace) return;
-        const QString engine = m_connectionEngine->itemData(index).toString();
-        if (engine.isEmpty()) return;
-        QObject *target = workspace->objectName() == QStringLiteral("serialScopeWorkspace")
-            ? workspace : workspace->findChild<QObject *>(QStringLiteral("tn160LivePage"));
-        if (target && workspace->objectName() == QStringLiteral("serialScopeWorkspace")) {
-            QMetaObject::invokeMethod(target, "setEngine", Qt::DirectConnection,
-                                       Q_ARG(QString, engine));
-        }
-    });
-    connect(m_firmwareChoose, &QPushButton::clicked, this, [this] {
-        QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
-        if (!workspace) return;
-        if (QObject *firmware = workspace->findChild<QObject *>(
-                QStringLiteral("tn160FirmwarePage"))) {
-            QMetaObject::invokeMethod(firmware, "chooseFirmware", Qt::QueuedConnection);
-        }
-    });
-    connect(m_firmwareMonitor, &QPushButton::clicked, this, [this] {
-        QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
-        if (!workspace) return;
-        if (QObject *firmware = workspace->findChild<QObject *>(
-                QStringLiteral("tn160FirmwarePage"))) {
-            QMetaObject::invokeMethod(firmware, "toggleMonitoring", Qt::QueuedConnection);
-        }
-    });
-    connect(m_tnRawCapture, &QPushButton::clicked, this, [this] {
-        QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
-        if (!workspace || workspace->objectName() != QStringLiteral("instrumentWorkspace")) return;
-        QObject *live = workspace->findChild<QObject *>(QStringLiteral("tn160LivePage"));
-        if (!live) return;
-        bool active = false;
-        QMetaObject::invokeMethod(live, "rawCaptureActive", Qt::DirectConnection,
-                                  Q_RETURN_ARG(bool, active));
-        if (active) {
-            QMetaObject::invokeMethod(live, "cancelRawCapture", Qt::QueuedConnection);
-        } else {
-            QMetaObject::invokeMethod(live, "startRawCapture", Qt::QueuedConnection,
-                                      Q_ARG(int, m_tnRawFrameCount->value()));
-        }
-    });
+    shell.bodyLayout->addWidget(version);
     return panel;
 }
+
 
 QWidget *MainWindow::buildHomePage()
 {
@@ -1119,9 +1146,10 @@ QWidget *MainWindow::buildHomePage()
     toolbarLayout->addWidget(hint);
     toolbarLayout->addStretch();
     auto *manage = new QPushButton(tr("插件管理"));
+    manage->setObjectName(QStringLiteral("componentManagementButton"));
     manage->setProperty("kind", QStringLiteral("primary"));
-    connect(manage, &QPushButton::clicked, this,
-            [this] { activatePage(ComponentsId); });
+    connect(manage, &QPushButton::clicked,
+            this, &MainWindow::toggleComponentManagement);
     toolbarLayout->addWidget(manage);
     outer->addWidget(toolbar);
 
@@ -1154,6 +1182,11 @@ QWidget *MainWindow::buildComponentCenter()
     m_storePath->setObjectName(QStringLiteral("muted"));
     m_storePath->setTextInteractionFlags(Qt::TextSelectableByMouse);
     toolbarLayout->addWidget(m_storePath, 1);
+    auto *exitManagement = new QPushButton(tr("退出管理"));
+    exitManagement->setObjectName(QStringLiteral("exitComponentManagementButton"));
+    connect(exitManagement, &QPushButton::clicked,
+            this, &MainWindow::toggleComponentManagement);
+    toolbarLayout->addWidget(exitManagement);
     auto *import = new QPushButton(tr("+ 导入插件包"));
     import->setProperty("kind", QStringLiteral("primary"));
     connect(import, &QPushButton::clicked, this, &MainWindow::importComponent);
@@ -1249,14 +1282,22 @@ void MainWindow::buildDocks()
     connectionTitleBar->setFixedHeight(0);
     m_navigationDock->setTitleBarWidget(connectionTitleBar);
     m_navigationDock->setWidget(buildNavigationPanel());
+    m_navigationDockHeader = m_navigationDock->findChild<QWidget *>(
+        QStringLiteral("dockHeader"));
     installFloatingDockChrome(m_navigationDock,
-                              m_navigationDock->findChild<QWidget *>(QStringLiteral("dockHeader")),
+                              m_navigationDockHeader,
                               connectionTitleBar, tr("设备连接"));
+    connect(m_navigationDock, &QDockWidget::topLevelChanged, this,
+            [this](const bool) {
+                QTimer::singleShot(0, this,
+                                   &MainWindow::synchronizePanelHeaderControls);
+            });
     // Device connection is a context/action surface. Keep it on the right
     // beside the data inspector so the left side remains the quiet canvas
     // edge and the two system panels have a single visual reading order.
     m_workbenchWindow->addDockWidget(Qt::RightDockWidgetArea, m_navigationDock);
-    m_navigationDock->setMinimumWidth(165);
+    m_navigationDock->setMinimumWidth(SidePanelMinimumWidth);
+    m_navigationDock->setMaximumWidth(SidePanelMaximumWidth);
 
     m_componentLibraryDock = new QDockWidget(tr("组件库"), m_workbenchWindow);
     m_componentLibraryDock->setObjectName(QStringLiteral("componentLibraryDock"));
@@ -1265,17 +1306,18 @@ void MainWindow::buildDocks()
     auto *libraryTitleBar = new QWidget(m_componentLibraryDock);
     libraryTitleBar->setFixedHeight(0);
     m_componentLibraryDock->setTitleBarWidget(libraryTitleBar);
-    auto *libraryPanel = new QWidget;
-    libraryPanel->setObjectName(QStringLiteral("dockPanelContent"));
-    auto *libraryLayout = new QVBoxLayout(libraryPanel);
-    libraryLayout->setContentsMargins(12, 12, 12, 12);
-    libraryLayout->setSpacing(8);
-    libraryLayout->addWidget(makeDockHeader(m_componentLibraryDock, tr("组件库")));
-    auto *libraryHint = new QLabel(tr("拖动到中央工作区以添加组件"));
+    const DockPanelShell libraryShell = makeDockPanelShell(
+        m_componentLibraryDock, tr("组件库"), "library");
+    QWidget *libraryPanel = libraryShell.surface;
+    QWidget *libraryBody = libraryShell.body;
+    QVBoxLayout *libraryBodyLayout = libraryShell.bodyLayout;
+    libraryBodyLayout->setContentsMargins(12, 10, 12, 12);
+    libraryBodyLayout->setSpacing(8);
+    auto *libraryHint = new QLabel(tr("拖动到中央工作区以添加组件"), libraryBody);
     libraryHint->setObjectName(QStringLiteral("pageSubtitle"));
     libraryHint->setWordWrap(true);
-    libraryLayout->addWidget(libraryHint);
-    auto *libraryList = new ComponentLibraryList;
+    libraryBodyLayout->addWidget(libraryHint);
+    auto *libraryList = new ComponentLibraryList(libraryBody);
     m_componentLibraryList = libraryList;
     libraryList->setObjectName(QStringLiteral("componentLibraryList"));
     libraryList->setDragEnabled(true);
@@ -1289,7 +1331,7 @@ void MainWindow::buildDocks()
     libraryList->setGridSize(QSize(62, 64));
     libraryList->setSpacing(4);
     libraryList->setWordWrap(false);
-    libraryLayout->addWidget(libraryList, 1);
+    libraryBodyLayout->addWidget(libraryList, 1);
     connect(libraryList, &QListWidget::itemDoubleClicked, this,
             [this](QListWidgetItem *item) {
         if (item) showLibraryComponent(item->data(Qt::UserRole).toString());
@@ -1312,46 +1354,67 @@ void MainWindow::buildDocks()
     auto *outputTitleBar = new QWidget(m_outputDock);
     outputTitleBar->setFixedHeight(0);
     m_outputDock->setTitleBarWidget(outputTitleBar);
-    auto *outputPanel = new QWidget;
-    outputPanel->setObjectName(QStringLiteral("dockPanelContent"));
-    auto *outputLayout = new QVBoxLayout(outputPanel);
-    outputLayout->setContentsMargins(8, 6, 8, 8);
-    outputLayout->setSpacing(6);
-    auto *outputDockHeader = makeDockHeader(m_outputDock, tr("输出终端"));
-    auto *clear = new QPushButton(tr("清空"));
-    clear->setProperty("kind", QStringLiteral("quiet"));
-    clear->setToolTip(tr("清空终端输出"));
-    clear->setCursor(Qt::PointingHandCursor);
+    const DockPanelShell outputShell = makeDockPanelShell(
+        m_outputDock, tr("输出终端"), "output");
+    QWidget *outputPanel = outputShell.surface;
+    auto *outputDockHeader = outputShell.header;
+    m_outputDockHeader = outputDockHeader;
+    m_outputClear = new QPushButton(tr("清空"));
+    m_outputClear->setObjectName(QStringLiteral("outputClearAction"));
+    m_outputClear->setProperty("kind", QStringLiteral("quiet"));
+    m_outputClear->setToolTip(tr("清空终端输出"));
+    m_outputClear->setCursor(Qt::PointingHandCursor);
     if (auto *headerLayout = qobject_cast<QHBoxLayout *>(outputDockHeader->layout())) {
         // Keep the action in the same chrome row as the terminal title and
         // dock controls. The former standalone hint row carried no action.
-        headerLayout->insertWidget(1, clear);
+        headerLayout->insertWidget(1, m_outputClear);
     }
-    outputLayout->addWidget(outputDockHeader);
+    QVBoxLayout *outputBodyLayout = outputShell.bodyLayout;
     m_output = new QPlainTextEdit;
+    m_output->setObjectName(QStringLiteral("outputLog"));
+    m_output->setStyleSheet(QStringLiteral("font-size: 16px;"));
     m_output->setReadOnly(true);
     m_output->document()->setMaximumBlockCount(2000);
-    connect(clear, &QPushButton::clicked, m_output, &QPlainTextEdit::clear);
+    connect(m_outputClear, &QPushButton::clicked, this, [this] {
+        if (m_outputStack && m_outputTrendHost
+            && m_outputStack->currentWidget() == m_outputTrendHost
+            && m_activeUiProvider) {
+            const WorkspacePanelPresentation panel =
+                m_activeUiProvider->context().outputPanel;
+            if (panel.clearTarget && !panel.clearMethod.isEmpty()) {
+                QMetaObject::invokeMethod(panel.clearTarget,
+                                          panel.clearMethod.constData(),
+                                          Qt::DirectConnection);
+            }
+            return;
+        }
+        if (m_output) m_output->clear();
+    });
     m_outputStack = new QStackedWidget(outputPanel);
     m_outputStack->setObjectName(QStringLiteral("outputContentStack"));
     m_outputStack->addWidget(m_output);
     m_outputTrendHost = new QWidget(m_outputStack);
-    m_outputTrendHost->setObjectName(QStringLiteral("tn160TrendOutput"));
+    m_outputTrendHost->setObjectName(QStringLiteral("workspaceOutputHost"));
     m_outputTrendLayout = new QVBoxLayout(m_outputTrendHost);
     m_outputTrendLayout->setContentsMargins(0, 0, 0, 0);
     m_outputTrendLayout->setSpacing(0);
-    m_outputTrendEmpty = new QLabel(tr("进入 TN160 实时诊断后，实时趋势会显示在这里。"),
+    m_outputTrendEmpty = new QLabel(tr("当前工作区没有提供输出面板内容。"),
                                     m_outputTrendHost);
     m_outputTrendEmpty->setObjectName(QStringLiteral("emptyState"));
     m_outputTrendEmpty->setAlignment(Qt::AlignCenter);
     m_outputTrendLayout->addWidget(m_outputTrendEmpty);
     m_outputStack->addWidget(m_outputTrendHost);
     m_outputStack->setCurrentWidget(m_output);
-    outputLayout->addWidget(m_outputStack, 1);
+    outputBodyLayout->addWidget(m_outputStack, 1);
     m_outputDock->setWidget(outputPanel);
     installFloatingDockChrome(m_outputDock,
                               outputPanel->findChild<QWidget *>(QStringLiteral("dockHeader")),
                               outputTitleBar, tr("输出终端"));
+    connect(m_outputDock, &QDockWidget::topLevelChanged, this,
+            [this](const bool) {
+                QTimer::singleShot(0, this,
+                                   &MainWindow::synchronizePanelHeaderControls);
+            });
     m_centerWorkbenchWindow->addDockWidget(Qt::BottomDockWidgetArea, m_outputDock);
 
     m_inspectorDock = new QDockWidget(tr("数据与属性"), m_workbenchWindow);
@@ -1361,14 +1424,22 @@ void MainWindow::buildDocks()
     auto *inspectorTitleBar = new QWidget(m_inspectorDock);
     inspectorTitleBar->setFixedHeight(0);
     m_inspectorDock->setTitleBarWidget(inspectorTitleBar);
-    auto *inspector = new QWidget;
-    inspector->setObjectName(QStringLiteral("dockPanelContent"));
-    auto *inspectorLayout = new QVBoxLayout(inspector);
-    inspectorLayout->setContentsMargins(12, 12, 12, 12);
-    inspectorLayout->setSpacing(7);
-    inspectorLayout->insertWidget(0, makeDockHeader(m_inspectorDock, tr("数据与属性")));
-    auto *active = new QLabel(tr("当前组件"));
-    active->setObjectName(QStringLiteral("sectionLabel"));
+    const DockPanelShell inspectorShell = makeDockPanelShell(
+        m_inspectorDock, tr("数据与属性"), "inspector");
+    QWidget *inspector = inspectorShell.surface;
+    inspector->setMinimumWidth(SidePanelMinimumWidth);
+    inspector->setMaximumWidth(SidePanelMaximumWidth);
+    auto *inspectorScroll = new QScrollArea(inspector);
+    inspectorScroll->setObjectName(QStringLiteral("workspaceInspectorScroll"));
+    inspectorScroll->setWidgetResizable(true);
+    inspectorScroll->setFrameShape(QFrame::NoFrame);
+    inspectorScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto *inspectorContent = new QWidget(inspectorScroll);
+    inspectorContent->setObjectName(QStringLiteral("inspectorContent"));
+    auto *inspectorLayout = new QVBoxLayout(inspectorContent);
+    m_inspectorBodyLayout = inspectorLayout;
+    inspectorLayout->setContentsMargins(12, 10, 12, 12);
+    inspectorLayout->setSpacing(8);
     m_inspectorName = new QLabel(tr("宿主概览"));
     m_inspectorName->setObjectName(QStringLiteral("cardTitle"));
     m_inspectorDescription = new QLabel(tr("从插件管理加载一个设备插件。"));
@@ -1379,57 +1450,35 @@ void MainWindow::buildDocks()
     m_inspectorCapabilities = new QLabel(tr("没有活动设备工作区"));
     m_inspectorCapabilities->setObjectName(QStringLiteral("pageSubtitle"));
     m_inspectorCapabilities->setWordWrap(true);
-    inspectorLayout->addWidget(active);
     inspectorLayout->addWidget(m_inspectorName);
     inspectorLayout->addWidget(m_inspectorDescription);
     inspectorLayout->addSpacing(8);
     inspectorLayout->addWidget(m_inspectorMeta);
     inspectorLayout->addWidget(m_inspectorCapabilities);
 
-    m_liveMetrics = new QWidget(inspector);
-    m_liveMetrics->setObjectName(QStringLiteral("tn160InspectorMetrics"));
-    m_liveMetrics->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
-    auto *liveMetricsLayout = new QVBoxLayout(m_liveMetrics);
-    liveMetricsLayout->setContentsMargins(0, 4, 0, 0);
-    liveMetricsLayout->setSpacing(0);
-    const auto addLiveMetric = [liveMetricsLayout](const QString &name,
-                                                    QLabel **value,
-                                                    const bool primary = false) {
-        auto *row = new QFrame;
-        row->setObjectName(primary ? QStringLiteral("metricPrimary")
-                                   : QStringLiteral("metricRow"));
-        row->setMaximumHeight(primary ? 64 : 28);
-        QBoxLayout *rowLayout = primary
-            ? static_cast<QBoxLayout *>(new QVBoxLayout(row))
-            : static_cast<QBoxLayout *>(new QHBoxLayout(row));
-        rowLayout->setContentsMargins(0, primary ? 0 : 2, 0, primary ? 8 : 2);
-        rowLayout->setSpacing(primary ? 2 : 8);
-        auto *label = new QLabel(name, row);
-        label->setObjectName(primary ? QStringLiteral("metricPrimaryLabel")
-                                     : QStringLiteral("metricLabel"));
-        *value = new QLabel(primary ? QStringLiteral("--.-- °C")
-                                    : QStringLiteral("—"), row);
-        (*value)->setObjectName(primary ? QStringLiteral("metricPrimaryValue")
-                                        : QStringLiteral("metricValue"));
-        (*value)->setAlignment(primary ? Qt::AlignLeft | Qt::AlignVCenter
-                                       : Qt::AlignRight | Qt::AlignVCenter);
-        rowLayout->addWidget(label);
-        rowLayout->addWidget(*value, 1);
-        liveMetricsLayout->addWidget(row);
-    };
-    addLiveMetric(QStringLiteral("CENTER 5×5"), &m_liveCenter, true);
-    addLiveMetric(QStringLiteral("NTC / 板载"), &m_liveNtc);
-    addLiveMetric(QStringLiteral("CENTER ADU"), &m_liveCenterAdu);
-    addLiveMetric(QStringLiteral("VTEMP ADU"), &m_liveVtemp);
-    addLiveMetric(tr("帧率"), &m_liveFps);
-    m_liveMetrics->hide();
-    inspectorLayout->addWidget(m_liveMetrics);
+    m_inspectorContributionHost = new QWidget(inspectorContent);
+    m_inspectorContributionHost->setObjectName(QStringLiteral("workspaceInspectorHost"));
+    m_inspectorContributionLayout = new QVBoxLayout(m_inspectorContributionHost);
+    m_inspectorContributionLayout->setContentsMargins(0, 0, 0, 0);
+    m_inspectorContributionLayout->setSpacing(0);
+    m_inspectorContributionHost->hide();
+    inspectorLayout->addWidget(m_inspectorContributionHost, 1);
     inspectorLayout->addStretch();
+    inspectorScroll->setWidget(inspectorContent);
+    inspectorShell.bodyLayout->addWidget(inspectorScroll, 1);
     m_inspectorDock->setWidget(inspector);
+    m_inspectorDockHeader = inspector->findChild<QWidget *>(
+        QStringLiteral("dockHeader"));
     installFloatingDockChrome(m_inspectorDock,
-                              inspector->findChild<QWidget *>(QStringLiteral("dockHeader")),
+                              m_inspectorDockHeader,
                               inspectorTitleBar, tr("数据与属性"));
-    m_inspectorDock->setMinimumWidth(165);
+    connect(m_inspectorDock, &QDockWidget::topLevelChanged, this,
+            [this](const bool) {
+                QTimer::singleShot(0, this,
+                                   &MainWindow::synchronizePanelHeaderControls);
+            });
+    m_inspectorDock->setMinimumWidth(SidePanelMinimumWidth);
+    m_inspectorDock->setMaximumWidth(SidePanelMaximumWidth);
     m_workbenchWindow->addDockWidget(Qt::LeftDockWidgetArea, m_inspectorDock);
 
     connect(m_navigationToggle, &QToolButton::clicked, m_navigationDock,
@@ -1452,10 +1501,54 @@ void MainWindow::buildDocks()
             });
     connect(m_navigationDock, &QDockWidget::visibilityChanged,
             m_navigationToggle, &QToolButton::setChecked);
+    connect(m_navigationDock, &QDockWidget::visibilityChanged, this,
+            [this](const bool visible) {
+                if (!visible || !m_pageLayoutsReady || m_applyingPageLayout
+                    || m_pageLayoutContext.isEmpty()) {
+                    return;
+                }
+                QTimer::singleShot(0, this, [this] {
+                    if (!m_navigationDock || m_navigationDock->isHidden()) return;
+                    resizeSideDocksForPage(storedPageLayout(m_pageLayoutContext));
+                });
+            });
     connect(m_inspectorDock, &QDockWidget::visibilityChanged,
             m_inspectorToggle, &QToolButton::setChecked);
+    connect(m_inspectorDock, &QDockWidget::visibilityChanged, this,
+            [this](const bool visible) {
+                if (m_pageLayoutsReady && !m_applyingPageLayout) {
+                    if (!visible) {
+                        savePageLayout(m_pageLayoutContext);
+                        return;
+                    }
+                    QTimer::singleShot(0, this, [this] {
+                        if (!m_inspectorDock || m_inspectorDock->isHidden()) return;
+                        const PageLayoutPreset layout = storedPageLayout(
+                            m_pageLayoutContext);
+                        const bool applying = m_applyingPageLayout;
+                        m_applyingPageLayout = true;
+                        resizeSideDocksForPage(layout);
+                        m_applyingPageLayout = applying;
+                        savePageLayout(m_pageLayoutContext);
+                    });
+                }
+            });
     connect(m_outputDock, &QDockWidget::visibilityChanged,
             m_outputToggle, &QToolButton::setChecked);
+    connect(m_outputDock, &QDockWidget::visibilityChanged, this,
+            [this](const bool visible) {
+                if (!m_pageLayoutsReady || m_applyingPageLayout) return;
+                if (!visible) {
+                    savePageLayout(m_pageLayoutContext);
+                    return;
+                }
+                const quint64 revision = ++m_pageLayoutRevision;
+                QTimer::singleShot(0, this, [this, revision] {
+                    if (revision != m_pageLayoutRevision) return;
+                    resizeOutputDockForCurrentPage();
+                    savePageLayout(m_pageLayoutContext);
+                });
+            });
     connect(m_componentLibraryDock, &QDockWidget::visibilityChanged,
             m_componentsToggle, &QToolButton::setChecked);
     connect(m_sleepButton, &QToolButton::clicked, this, &MainWindow::toggleDarkMode);
@@ -1478,7 +1571,6 @@ void MainWindow::buildDocks()
         m_componentLibraryDock->hide();
         m_navigationDock->show();
     });
-    refreshConnectionPanel();
 }
 
 void MainWindow::buildMenu()
@@ -1487,10 +1579,10 @@ void MainWindow::buildMenu()
     auto *home = workspace->addAction(tr("返回开始"));
     home->setShortcut(QKeySequence(QStringLiteral("Ctrl+Home")));
     connect(home, &QAction::triggered, this, [this] { activatePage(HomeId); });
-    auto *components = workspace->addAction(tr("打开插件管理"));
+    auto *components = workspace->addAction(tr("打开/退出插件管理"));
     components->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+C")));
-    connect(components, &QAction::triggered, this,
-            [this] { activatePage(ComponentsId); });
+    connect(components, &QAction::triggered,
+            this, &MainWindow::toggleComponentManagement);
     workspace->addSeparator();
     auto *import = workspace->addAction(tr("导入组件包…"));
     connect(import, &QAction::triggered, this, &MainWindow::importComponent);
@@ -1502,8 +1594,19 @@ void MainWindow::buildMenu()
     auto *view = workspace->addMenu(tr("面板"));
     view->addAction(m_inspectorDock->toggleViewAction());
     view->addAction(m_outputDock->toggleViewAction());
-    auto *reset = workspace->addAction(tr("恢复默认布局"));
+    auto *reset = workspace->addAction(tr("恢复当前页面默认布局"));
     connect(reset, &QAction::triggered, this, &MainWindow::resetDockLayout);
+    auto *resetAll = workspace->addAction(tr("恢复全部页面默认布局…"));
+    connect(resetAll, &QAction::triggered, this, [this] {
+        if (QMessageBox::question(
+                this, tr("恢复全部页面默认布局"),
+                tr("将清除 Serial Scope 和 TN160 各页面保存的面板比例与可见性。\n"
+                   "串口、标签和标定数据不会改变。"),
+                QMessageBox::RestoreDefaults | QMessageBox::Cancel,
+                QMessageBox::Cancel) == QMessageBox::RestoreDefaults) {
+            resetAllDockLayouts();
+        }
+    });
     workspace->addSeparator();
     auto *quit = workspace->addAction(tr("退出"));
     quit->setShortcut(QKeySequence::Quit);
@@ -1519,6 +1622,7 @@ void MainWindow::buildMenu()
 
         auto *edit = m_appMenuBar->addMenu(tr("编辑"));
         edit->addAction(reset);
+        edit->addAction(resetAll);
 
         auto *viewBar = m_appMenuBar->addMenu(tr("视图"));
         viewBar->addAction(m_inspectorDock->toggleViewAction());
@@ -1547,6 +1651,21 @@ void MainWindow::navigationChanged()
     }
 }
 
+void MainWindow::toggleComponentManagement()
+{
+    if (m_activePage != ComponentsId) {
+        activatePage(ComponentsId);
+        return;
+    }
+
+    QString target = m_pageBeforeComponentManagement;
+    if (target.isEmpty() || target == ComponentsId
+        || (target != HomeId && !m_components->isLoaded(target))) {
+        target = HomeId;
+    }
+    activatePage(target);
+}
+
 void MainWindow::importComponent()
 {
     const QString source = QFileDialog::getOpenFileName(
@@ -1559,6 +1678,8 @@ void MainWindow::importComponent()
         QMessageBox::warning(this, tr("导入失败"), error);
         return;
     }
+    QSettings().setValue(LastComponentImportDirectoryKey,
+                         QFileInfo(source).absolutePath());
     activatePage(ComponentsId);
     setStatus(tr("插件包已安装 · 点击“加载插件”后才会进入内存"));
 }
@@ -1583,7 +1704,8 @@ void MainWindow::refreshComponentUi()
                                  .arg(loaded)
                                  .arg(installed.size()));
     }
-    if (m_activePage != HomeId && m_activePage != ComponentsId
+    if (!m_activePage.isEmpty()
+        && m_activePage != HomeId && m_activePage != ComponentsId
         && !m_components->isLoaded(m_activePage)) {
         activatePage(ComponentsId);
     }
@@ -1671,12 +1793,18 @@ void MainWindow::rebuildCards(QGridLayout *grid, const bool loadedOnly,
         auto *card = new PluginCard(component.metadata, component.loaded,
                                     isWorkspaceOpen(component.metadata.id),
                                     managementActions);
+        // Card actions can rebuild both grids and delete the sending card.
+        // Let the button event return first and copy the component id into the
+        // queued call before any card is destroyed.
         connect(card, &PluginCard::primaryRequested,
-                this, &MainWindow::requestPrimaryAction);
+                this, &MainWindow::requestPrimaryAction,
+                Qt::QueuedConnection);
         connect(card, &PluginCard::unloadRequested,
-                this, &MainWindow::requestUnload);
+                this, &MainWindow::requestUnload,
+                Qt::QueuedConnection);
         connect(card, &PluginCard::removeRequested,
-                this, &MainWindow::requestRemove);
+                this, &MainWindow::requestRemove,
+                Qt::QueuedConnection);
         grid->addWidget(card, index / columns, index % columns);
         ++index;
     }
@@ -1696,6 +1824,12 @@ void MainWindow::rebuildCards(QGridLayout *grid, const bool loadedOnly,
 
 void MainWindow::activatePage(const QString &pageId, const bool synchronizeNavigation)
 {
+    if (m_pageLayoutsReady) {
+        savePageLayout(m_pageLayoutContext);
+        m_pageLayoutContext.clear();
+        ++m_pageLayoutRevision;
+    }
+    detachWorkspacePanels();
     if (pageId == HomeId || pageId.isEmpty()) {
         m_activePage = HomeId;
         m_stack->setCurrentIndex(0);
@@ -1704,6 +1838,10 @@ void MainWindow::activatePage(const QString &pageId, const bool synchronizeNavig
         m_unloadComponent->hide();
         setStatus(tr("就绪 · 从组件库加载仪器"));
     } else if (pageId == ComponentsId) {
+        if (m_activePage == HomeId
+            || (!m_activePage.isEmpty() && m_components->isLoaded(m_activePage))) {
+            m_pageBeforeComponentManagement = m_activePage;
+        }
         m_activePage = ComponentsId;
         m_stack->setCurrentIndex(1);
         updateInspector(nullptr);
@@ -1714,16 +1852,22 @@ void MainWindow::activatePage(const QString &pageId, const bool synchronizeNavig
         activateComponent(pageId, synchronizeNavigation);
         return;
     }
+    QSettings().setValue(LastActivePageSettingsKey, m_activePage);
     rebuildWorkspaceTabs();
     if (synchronizeNavigation) selectNavigation(m_activePage);
     selectWorkspaceTab(m_activePage);
-    refreshConnectionPanel();
     synchronizeContextPanels();
+    switchPageLayoutContext();
 }
 
 void MainWindow::activateComponent(const QString &componentId,
                                    const bool synchronizeNavigation)
 {
+    if (m_pageLayoutsReady && !m_pageLayoutContext.isEmpty()) {
+        savePageLayout(m_pageLayoutContext);
+        m_pageLayoutContext.clear();
+        ++m_pageLayoutRevision;
+    }
     QString error;
     if (!m_components->isLoaded(componentId)
         && !m_components->load(componentId, &error)) {
@@ -1741,44 +1885,48 @@ void MainWindow::activateComponent(const QString &componentId,
             log(QStringLiteral("error"), tr("插件未能创建设备工作区：%1").arg(component.metadata.name));
             return;
         }
+        QString contractError;
+        if (!validateWorkspaceContract(workspace, &contractError)) {
+            if (auto *managed = qobject_cast<IDeviceWorkspace *>(workspace)) {
+                managed->shutdown();
+            }
+            delete workspace;
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+            log(QStringLiteral("error"),
+                tr("组件工作区不符合宿主模板：%1").arg(contractError));
+            QMessageBox::warning(this, tr("组件工作区无效"), contractError);
+            return;
+        }
         auto created = std::make_unique<WorkspaceRecord>();
         created->componentId = componentId;
         created->widget = workspace;
         created->stackIndex = m_stack->addWidget(workspace);
         record = created.get();
         m_workspaces.emplace_back(std::move(created));
-        if (auto *tabs = workspace->findChild<QTabBar *>(QStringLiteral("workspaceTabs"))) {
-            connect(tabs, &QTabBar::currentChanged, this,
-                    [this](const int) {
-                        refreshConnectionPanel();
-                        synchronizeContextPanels();
-                    });
+        if (auto *contributor = qobject_cast<IWorkspaceUiProvider *>(workspace)) {
+            if (WorkspaceUiProvider *provider = contributor->workspaceUiProvider()) {
+                connect(provider, &WorkspaceUiProvider::presentationAboutToChange,
+                        this, [this, provider] {
+                            if (provider == activeWorkspaceUiProvider()) {
+                                preparePageLayoutChange();
+                            }
+                        });
+                connect(provider, &WorkspaceUiProvider::presentationChanged,
+                        this, [this, provider] {
+                            if (provider == activeWorkspaceUiProvider()) {
+                                synchronizeContextPanels();
+                                switchPageLayoutContext();
+                            }
+                });
+            }
         }
-        if (workspace->objectName() == QStringLiteral("serialScopeWorkspace")) {
-            connect(workspace, SIGNAL(connectionStateChanged(QString,QString)),
-                    this, SLOT(updateConnectionState(QString,QString)));
-        } else if (QObject *live = workspace->findChild<QObject *>(QStringLiteral("tn160LivePage"))) {
-            if (QObject *firmware = workspace->findChild<QObject *>(
-                    QStringLiteral("tn160FirmwarePage"))) {
-                connect(firmware, SIGNAL(firmwareStateChanged(QString,QString,bool)),
-                        this, SLOT(updateFirmwareState(QString,QString,bool)));
-            }
-            connect(live, SIGNAL(connectionStateChanged(QString,QString)),
-                    this, SLOT(updateConnectionState(QString,QString)));
-            connect(live, SIGNAL(rawCaptureStateChanged(QString,QString)),
-                    this, SLOT(updateRawCaptureState(QString,QString)));
-            connect(live, SIGNAL(telemetryChanged(QString,QString,QString,QString,QString)),
-                    this, SLOT(updateTn160Telemetry(QString,QString,QString,QString,QString)));
-            if (QObject *calibrate = workspace->findChild<QObject *>(
-                    QStringLiteral("tn160CalibrationPage"))) {
-                connect(calibrate, SIGNAL(transferStateChanged(QString,QString)),
-                        this, SLOT(updateCalibrationState(QString,QString)));
-            }
-            if (QObject *dump = workspace->findChild<QObject *>(
-                    QStringLiteral("tn160CalibrationDataPage"))) {
-                connect(dump, SIGNAL(transferStateChanged(QString,QString)),
-                        this, SLOT(updateCalibrationState(QString,QString)));
-            }
+        if (auto *canvas = workspace->findChild<WorkspaceCanvas *>()) {
+            connect(canvas, &WorkspaceCanvas::componentDropRequested, this,
+                    [this, workspace](const QString &id, const QPoint &position) {
+                if (m_stack && m_stack->currentWidget() == workspace) {
+                    createRegisteredComponentAt(id, position);
+                }
+            });
         }
         if (m_sleepButton && m_sleepButton->isChecked()) applyDarkMode(true);
         log(QStringLiteral("info"), tr("已创建设备工作区：%1").arg(component.metadata.name));
@@ -1786,28 +1934,31 @@ void MainWindow::activateComponent(const QString &componentId,
     }
     m_activePage = componentId;
     m_stack->setCurrentWidget(record->widget);
+    QSettings().setValue(LastActivePageSettingsKey, m_activePage);
     updateInspector(&component.metadata);
     setStatus(tr("%1 · 工作区运行中").arg(component.metadata.name));
     rebuildWorkspaceTabs();
     if (synchronizeNavigation) selectNavigation(componentId);
     selectWorkspaceTab(componentId);
-    refreshConnectionPanel();
     synchronizeContextPanels();
-    QTimer::singleShot(120, this, &MainWindow::refreshConnectionPanel);
+    switchPageLayoutContext();
 }
 
 void MainWindow::requestPrimaryAction(const QString &componentId)
 {
-    if (!m_components->isLoaded(componentId)) {
+    // Loading emits componentsChanged.  Keep an owned copy across that
+    // re-entrant boundary; the originating card can be rebuilt afterwards.
+    const QString id = componentId;
+    if (!m_components->isLoaded(id)) {
         QString error;
-        if (!m_components->load(componentId, &error)) {
+        if (!m_components->load(id, &error)) {
             QMessageBox::warning(this, tr("加载失败"), error);
             return;
         }
-        activateComponent(componentId);
+        activateComponent(id);
         return;
     }
-    activateComponent(componentId);
+    activateComponent(id);
 }
 
 void MainWindow::requestUnload(const QString &componentId)
@@ -1844,9 +1995,9 @@ bool MainWindow::closeWorkspace(const QString &componentId)
     WorkspaceRecord *record = findWorkspace(componentId);
     if (!record || !record->widget) return true;
     QWidget *widget = record->widget;
-    if (m_attachedTn160TrendOwner == widget
-        || (m_attachedTn160TrendOwner && widget->isAncestorOf(m_attachedTn160TrendOwner))) {
-        detachTn160Trend();
+    if (m_stack && m_stack->currentWidget() == widget) {
+        detachWorkspacePanels();
+        m_componentRegistry.clear();
     }
     if (auto *managed = qobject_cast<IDeviceWorkspace *>(widget)) managed->shutdown();
     m_stack->removeWidget(widget);
@@ -1919,9 +2070,20 @@ void MainWindow::selectNavigation(const QString &id)
 
 QString MainWindow::componentPackageStartPath() const
 {
+    const QString lastDirectory = QSettings().value(
+        LastComponentImportDirectoryKey).toString();
+    if (!lastDirectory.isEmpty() && QDir(lastDirectory).exists()) {
+        return QDir(lastDirectory).absolutePath();
+    }
+
+    const QString packagedPath = ComponentManager::packagedStorePath();
+    if (!packagedPath.isEmpty()) return packagedPath;
     QDir sibling(QCoreApplication::applicationDirPath());
     sibling.cdUp();
-    if (sibling.cd(QStringLiteral("Components"))) return sibling.absolutePath();
+    QDir buildComponents(sibling);
+    if (buildComponents.cd(QStringLiteral("component_packages"))) {
+        return buildComponents.absolutePath();
+    }
     const QString downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
     return downloads.isEmpty() ? QDir::homePath() : downloads;
 }
@@ -1942,249 +2104,50 @@ void MainWindow::setStatus(const QString &message)
 
 void MainWindow::resetDockLayout()
 {
+    const QString context = currentPageLayoutContext();
+    if (context.isEmpty()) {
+        applyDefaultDockLayout();
+        log(QStringLiteral("info"), tr("已恢复宿主默认面板布局"));
+        return;
+    }
+    QSettings().remove(PageLayoutSettingsGroup + QLatin1Char('/') + context);
+    m_applyingPageLayout = true;
+    m_outputDock->setFloating(false);
+    m_inspectorDock->setFloating(false);
+    m_centerWorkbenchWindow->addDockWidget(Qt::BottomDockWidgetArea, m_outputDock);
+    m_workbenchWindow->addDockWidget(Qt::LeftDockWidgetArea, m_inspectorDock);
+    m_applyingPageLayout = false;
+    m_pageLayoutContext = context;
+    applyPageLayout(context, defaultPageLayout(context));
+    log(QStringLiteral("info"), tr("已恢复当前页面默认布局：%1").arg(context));
+}
+
+void MainWindow::preparePageLayoutChange()
+{
+    if (!m_pageLayoutsReady) return;
+    savePageLayout(m_pageLayoutContext);
+    m_pageLayoutContext.clear();
+    ++m_pageLayoutRevision;
+    // presentationAboutToChange is the ownership barrier: return the old
+    // panel bodies and header controls before the component changes pages or
+    // destroys any of its presentation objects.
+    detachWorkspacePanels();
+}
+
+void MainWindow::resetAllDockLayouts()
+{
+    QSettings settings;
+    settings.remove(PageLayoutSettingsGroup);
+    settings.remove(DockSettingsKey);
+    settings.remove(CentralDockSettingsKey);
+    m_applyingPageLayout = true;
     applyDefaultDockLayout();
-    log(QStringLiteral("info"), tr("已恢复默认面板布局"));
-}
-
-QObject *MainWindow::connectionTargetForCurrentWorkspace() const
-{
-    QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
-    if (!workspace) return nullptr;
-    if (workspace->objectName() == QStringLiteral("serialScopeWorkspace")) {
-        return workspace;
+    m_applyingPageLayout = false;
+    m_pageLayoutContext = currentPageLayoutContext();
+    if (!m_pageLayoutContext.isEmpty()) {
+        applyPageLayout(m_pageLayoutContext, defaultPageLayout(m_pageLayoutContext));
     }
-    if (workspace->objectName() != QStringLiteral("instrumentWorkspace")) {
-        return nullptr;
-    }
-    int page = -1;
-    QMetaObject::invokeMethod(workspace, "currentPageIndex", Qt::DirectConnection,
-                              Q_RETURN_ARG(int, page));
-    const QString pageObject = page == 1 ? QStringLiteral("tn160LivePage")
-        : page == 2 ? QStringLiteral("tn160CalibrationPage")
-        : page == 3 ? QStringLiteral("tn160CalibrationDataPage") : QString();
-    return pageObject.isEmpty() ? nullptr : workspace->findChild<QObject *>(pageObject);
-}
-
-bool MainWindow::connectionTargetActive(QObject *target) const
-{
-    if (!target) return false;
-    bool active = false;
-    const QString name = target->objectName();
-    const char *method = name == QStringLiteral("tn160CalibrationPage")
-            || name == QStringLiteral("tn160CalibrationDataPage")
-        ? "transferActive" : "connectionActive";
-    return QMetaObject::invokeMethod(target, method, Qt::DirectConnection,
-                                     Q_RETURN_ARG(bool, active)) && active;
-}
-
-void MainWindow::setConnectionConfigurationEnabled(const bool canConnect,
-                                                   const bool serial,
-                                                   const bool calibration,
-                                                   const bool locked)
-{
-    const bool enabled = canConnect && !locked;
-    if (m_connectionPort) m_connectionPort->setEnabled(enabled);
-    if (m_connectionBaud) m_connectionBaud->setEnabled(enabled && !calibration);
-    if (m_connectionTriggerBaud) m_connectionTriggerBaud->setEnabled(enabled && calibration);
-    if (m_connectionReadBaud) m_connectionReadBaud->setEnabled(enabled && calibration);
-    if (m_connectionEngine) m_connectionEngine->setEnabled(enabled && serial);
-    if (m_connectionScan) m_connectionScan->setEnabled(enabled);
-}
-
-void MainWindow::scanConnectionPorts()
-{
-    const int detectedCount = SerialTransport::availablePorts().size();
-    refreshConnectionPanel();
-    if (!m_connectionState || !m_connectionScan || !m_connectionScan->isEnabled()) {
-        return;
-    }
-    const QString text = detectedCount > 0
-        ? tr("扫描到 %1 个串口").arg(detectedCount)
-        : tr("未发现串口；可手动输入 COMx");
-    m_connectionState->setText(text);
-    m_connectionState->setProperty("state", detectedCount > 0
-                                                ? QStringLiteral("installed")
-                                                : QStringLiteral("error"));
-    m_connectionState->style()->unpolish(m_connectionState);
-    m_connectionState->style()->polish(m_connectionState);
-    log(detectedCount > 0 ? QStringLiteral("info") : QStringLiteral("warning"), text);
-}
-
-void MainWindow::refreshConnectionPanel()
-{
-    if (!m_connectionPort) return;
-    for (QWidget *widget : {static_cast<QWidget *>(m_tnRawFrameLabel),
-                           static_cast<QWidget *>(m_tnRawFrameCount),
-                           static_cast<QWidget *>(m_tnRawCapture)}) {
-        if (widget) widget->setVisible(false);
-    }
-    QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
-    int tn160Page = -1;
-    if (workspace && workspace->objectName() == QStringLiteral("instrumentWorkspace")) {
-        QMetaObject::invokeMethod(workspace, "currentPageIndex", Qt::DirectConnection,
-                                  Q_RETURN_ARG(int, tn160Page));
-    }
-
-    const bool firmware = workspace
-        && workspace->objectName() == QStringLiteral("instrumentWorkspace")
-        && tn160Page == 0;
-    if (m_connectionModeStack) m_connectionModeStack->setCurrentIndex(firmware ? 1 : 0);
-    if (!firmware) updateFirmwareState(QString(), QString(), false);
-    if (m_navigationDock) {
-        const QString dockTitle = firmware ? tr("固件烧录") : tr("设备连接");
-        m_navigationDock->setWindowTitle(dockTitle);
-        for (QLabel *label : m_navigationDock->findChildren<QLabel *>(
-                 QStringLiteral("dockTitle"))) {
-            label->setText(dockTitle);
-        }
-    }
-    if (firmware) {
-        QString path;
-        QString status;
-        bool monitoring = false;
-        if (QObject *page = workspace->findChild<QObject *>(
-                QStringLiteral("tn160FirmwarePage"))) {
-            QMetaObject::invokeMethod(page, "firmwarePath", Qt::DirectConnection,
-                                      Q_RETURN_ARG(QString, path));
-            QMetaObject::invokeMethod(page, "firmwareStatus", Qt::DirectConnection,
-                                      Q_RETURN_ARG(QString, status));
-            QMetaObject::invokeMethod(page, "monitoring", Qt::DirectConnection,
-                                      Q_RETURN_ARG(bool, monitoring));
-        }
-        updateFirmwareState(path, status, monitoring);
-        synchronizeContextPanels();
-        return;
-    }
-
-    const QString current = m_connectionPort->currentText();
-    const QSignalBlocker blocker(m_connectionPort);
-    const QSignalBlocker baudBlocker(m_connectionBaud);
-    const QSignalBlocker triggerBaudBlocker(m_connectionTriggerBaud);
-    const QSignalBlocker readBaudBlocker(m_connectionReadBaud);
-    m_connectionPort->clear();
-    for (const SerialPortInfo &port : SerialTransport::availablePorts()) {
-        m_connectionPort->addItem(port.portName, port.description);
-    }
-    const int previous = m_connectionPort->findText(current);
-    if (previous >= 0) m_connectionPort->setCurrentIndex(previous);
-
-    QObject *target = nullptr;
-    bool canConnect = false;
-    const bool serial = workspace
-        && workspace->objectName() == QStringLiteral("serialScopeWorkspace");
-    bool calibration = false;
-    bool calibrationDump = false;
-    QString title = tr("未打开可连接工作区");
-    if (serial) {
-        target = workspace;
-        canConnect = true;
-        title = tr("Serial Scope · 就绪");
-    } else if (workspace && workspace->objectName() == QStringLiteral("instrumentWorkspace")) {
-        int page = -1;
-        QMetaObject::invokeMethod(workspace, "currentPageIndex", Qt::DirectConnection,
-                                  Q_RETURN_ARG(int, page));
-        const QString pageObject = page == 2 ? QStringLiteral("tn160CalibrationPage")
-            : page == 3 ? QStringLiteral("tn160CalibrationDataPage")
-                        : QStringLiteral("tn160LivePage");
-        target = workspace->findChild<QObject *>(pageObject);
-        calibration = page == 2 || page == 3;
-        calibrationDump = page == 3;
-        canConnect = target != nullptr && (page == 1 || calibration);
-        title = page == 1 ? tr("TN160 · 实时诊断")
-            : page == 2 ? tr("TN160 · 设备标定")
-            : page == 3 ? tr("TN160 · 标定数据")
-                        : tr("TN160 · 当前页面无串口动作");
-    }
-    m_connectionBaudLabel->setVisible(!calibration);
-    m_connectionBaud->setVisible(!calibration);
-    m_connectionTriggerBaudLabel->setVisible(calibration);
-    m_connectionTriggerBaud->setVisible(calibration);
-    m_connectionReadBaudLabel->setVisible(calibration);
-    m_connectionReadBaud->setVisible(calibration);
-    m_connectionEngineLabel->setVisible(serial);
-    m_connectionEngine->setVisible(serial);
-    const bool tn160Live = !serial && !calibration
-        && workspace && workspace->objectName() == QStringLiteral("instrumentWorkspace")
-        && tn160Page == 1;
-    for (QWidget *widget : {static_cast<QWidget *>(m_tnRawFrameLabel),
-                           static_cast<QWidget *>(m_tnRawFrameCount),
-                           static_cast<QWidget *>(m_tnRawCapture)}) {
-        if (widget) widget->setVisible(tn160Live);
-    }
-    if (m_tnRawFrameCount) m_tnRawFrameCount->setEnabled(tn160Live && canConnect);
-    if (m_tnRawCapture) m_tnRawCapture->setEnabled(tn160Live && canConnect);
-    const bool sessionActive = canConnect && connectionTargetActive(target);
-    setConnectionConfigurationEnabled(canConnect, serial, calibration, sessionActive);
-    m_connectionToggle->setEnabled(canConnect && !(calibration && sessionActive));
-    m_connectionToggle->setText(!canConnect ? tr("连接")
-        : calibrationDump ? tr("读取标定数据")
-        : calibration ? tr("开始标定")
-        : sessionActive ? (serial ? tr("断开") : tr("停止采集"))
-                        : (serial ? tr("连接") : tr("开始采集")));
-    m_connectionState->setText(title);
-    m_connectionState->setProperty("state", canConnect ? QStringLiteral("installed")
-                                                          : QStringLiteral("disabled"));
-    m_connectionState->style()->unpolish(m_connectionState);
-    m_connectionState->style()->polish(m_connectionState);
-
-    if (canConnect && target) {
-        QMetaObject::invokeMethod(target, "refreshPorts", Qt::DirectConnection);
-        const QString portObject = serial ? QStringLiteral("serialPort")
-            : calibration ? (calibrationDump ? QStringLiteral("tn160CalibrationDataPort")
-                                             : QStringLiteral("tn160CalibrationPort"))
-                          : QStringLiteral("tn160Port");
-        QComboBox *sourcePort = workspace->findChild<QComboBox *>(portObject);
-        if (sourcePort) {
-            const QSignalBlocker sourceBlocker(m_connectionPort);
-            const QString selected = sourcePort->currentText();
-            m_connectionPort->clear();
-            for (int index = 0; index < sourcePort->count(); ++index) {
-                m_connectionPort->addItem(sourcePort->itemText(index), sourcePort->itemData(index));
-            }
-            int selectedIndex = m_connectionPort->findText(selected);
-            if (selectedIndex < 0 && !selected.trimmed().isEmpty()) {
-                m_connectionPort->addItem(selected.trimmed(), tr("手动端口"));
-                selectedIndex = m_connectionPort->count() - 1;
-            }
-            if (selectedIndex >= 0) m_connectionPort->setCurrentIndex(selectedIndex);
-        }
-        if (serial) {
-            QComboBox *sourceEngine = workspace->findChild<QComboBox *>(
-                QStringLiteral("serialEngine"));
-            if (sourceEngine) {
-                const QSignalBlocker sourceBlocker(m_connectionEngine);
-                const int current = m_connectionEngine->findData(sourceEngine->currentData());
-                if (current >= 0) m_connectionEngine->setCurrentIndex(current);
-            }
-            int baud = 0;
-            if (QMetaObject::invokeMethod(target, "baudRate", Qt::DirectConnection,
-                                          Q_RETURN_ARG(int, baud)) && baud > 0) {
-                m_connectionBaud->setValue(baud);
-            }
-        } else if (!calibration) {
-            int baud = 0;
-            if (QMetaObject::invokeMethod(target, "baudRate", Qt::DirectConnection,
-                                          Q_RETURN_ARG(int, baud)) && baud > 0) {
-                m_connectionBaud->setValue(baud);
-            }
-        } else if (calibration) {
-            const QString pageObject = calibrationDump
-                ? QStringLiteral("tn160CalibrationDataPage")
-                : QStringLiteral("tn160CalibrationPage");
-            QObject *page = workspace->findChild<QObject *>(pageObject);
-            if (page) {
-                if (auto *trigger = page->findChild<QSpinBox *>(
-                        QStringLiteral("tn160CalibrationTriggerBaud"))) {
-                    m_connectionTriggerBaud->setValue(trigger->value());
-                }
-                if (auto *read = page->findChild<QSpinBox *>(
-                        QStringLiteral("tn160CalibrationReadBaud"))) {
-                    m_connectionReadBaud->setValue(read->value());
-                }
-            }
-        }
-    }
-    synchronizeContextPanels();
+    log(QStringLiteral("info"), tr("已恢复全部页面默认布局；连接与标定数据未改变"));
 }
 
 void MainWindow::refreshComponentLibrary()
@@ -2192,288 +2155,393 @@ void MainWindow::refreshComponentLibrary()
     if (!m_componentLibraryList) return;
     m_componentLibraryList->clear();
 
-    QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
-    QList<QPair<QString, QString>> items;
-    if (workspace && workspace->objectName() == QStringLiteral("serialScopeWorkspace")) {
-        items = {
-            {QStringLiteral("waveform"), tr("实时波形")},
-            {QStringLiteral("channels"), tr("数据通道")},
-            {QStringLiteral("terminal"), tr("串口终端")},
-        };
-    } else if (workspace && workspace->objectName() == QStringLiteral("instrumentWorkspace")) {
-        int page = -1;
-        QMetaObject::invokeMethod(workspace, "currentPageIndex", Qt::DirectConnection,
-                                  Q_RETURN_ARG(int, page));
-        if (page == 1) items = {{QStringLiteral("thermal"), tr("TN160 热图")}};
+    const QList<WorkspaceComponentDefinition> definitions =
+        m_componentRegistry.definitions();
+    QSet<QString> registeredIds;
+    for (const WorkspaceComponentDefinition &definition : definitions) {
+        auto *item = new QListWidgetItem(QIcon(definition.iconSource), QString(),
+                                         m_componentLibraryList);
+        item->setData(Qt::UserRole, definition.definitionId);
+        item->setToolTip(tr("%1\n拖动到中央工作区添加")
+                             .arg(definition.displayName));
+        item->setStatusTip(definition.displayName);
+        registeredIds.insert(definition.definitionId);
     }
 
-    const QHash<QString, QString> icons{
-        {QStringLiteral("waveform"), QStringLiteral(":/serein/waveform.svg")},
-        {QStringLiteral("channels"), QStringLiteral(":/serein/channels.svg")},
-        {QStringLiteral("terminal"), QStringLiteral(":/serein/terminal.svg")},
-        {QStringLiteral("thermal"), QStringLiteral(":/serein/thermal.svg")},
-    };
-    for (const auto &[id, title] : items) {
-        auto *item = new QListWidgetItem(QIcon(icons.value(id)), QString(),
+    WorkspaceUiProvider *provider = activeWorkspaceUiProvider();
+    const WorkspaceLibraryPresentation library = provider
+        ? provider->context().componentLibrary : WorkspaceLibraryPresentation{};
+    for (const WorkspaceLibraryItem &entry : library.items) {
+        if (registeredIds.contains(entry.id)) continue;
+        auto *item = new QListWidgetItem(QIcon(entry.iconSource), QString(),
                                          m_componentLibraryList);
-        item->setData(Qt::UserRole, id);
-        item->setToolTip(tr("%1\n拖动到中央工作区添加").arg(title));
-        item->setStatusTip(title);
+        item->setData(Qt::UserRole, entry.id);
+        item->setToolTip(tr("%1\n拖动到中央工作区添加").arg(entry.title));
+        item->setStatusTip(entry.title);
     }
+}
+
+void MainWindow::synchronizeComponentRegistry()
+{
+    m_componentRegistry.clear();
+    QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
+    auto *provider = workspace
+        ? qobject_cast<IWorkspaceComponentProvider *>(workspace) : nullptr;
+    if (!provider) return;
+
+    QString error;
+    // The registry is scoped to the active workspace and cleared before each
+    // refresh. The workspace itself remains owned by m_workspaces, so no
+    // extra destroyed callback is needed here (and repeated refreshes cannot
+    // accumulate callbacks for the same provider address).
+    if (!m_componentRegistry.registerProvider(provider, nullptr, &error)) {
+        log(QStringLiteral("warning"),
+            tr("忽略工作区组件定义：%1").arg(error));
+    }
+}
+
+bool MainWindow::createRegisteredComponentAt(const QString &componentId,
+                                              const QPoint &position)
+{
+    if (componentId.trimmed().isEmpty() || !m_componentRegistry.contains(componentId)) {
+        return false;
+    }
+    QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
+    auto *canvas = workspace ? workspace->findChild<WorkspaceCanvas *>() : nullptr;
+    if (!canvas) return false;
+
+    // New component providers are activated through the registry. Existing
+    // canvas instances are reused (important for a live device session); a
+    // factory is called only when the definition has not already been added
+    // to the current canvas.
+    bool added = false;
+    if (canvas->componentFrame(componentId)) {
+        added = canvas->addOrShowComponentAt(componentId);
+    } else {
+        const WorkspaceComponentDefinition definition =
+            m_componentRegistry.definition(componentId);
+        QString error;
+        QWidget *content = m_componentRegistry.createComponent(
+            componentId, canvas, &error);
+        if (content) {
+            QRectF geometry(0.08, 0.08, 0.84, 0.60);
+            if (canvas->width() > 0 && canvas->height() > 0) {
+                const qreal width = std::clamp(
+                    qreal(definition.defaultSize.width()) / canvas->width(),
+                    qreal(0.20), qreal(0.84));
+                const qreal height = std::clamp(
+                    qreal(definition.defaultSize.height()) / canvas->height(),
+                    qreal(0.20), qreal(0.84));
+                const QPoint target = position.x() >= 0 && position.y() >= 0
+                    ? position : QPoint(canvas->width() / 2,
+                                        canvas->height() / 2);
+                geometry = QRectF(
+                    std::clamp((target.x() / qreal(canvas->width())) - width / 2.0,
+                               0.0, 1.0 - width),
+                    std::clamp((target.y() / qreal(canvas->height())) - height / 2.0,
+                               0.0, 1.0 - height), width, height);
+            }
+            added = canvas->addComponent(
+                definition.definitionId, definition.displayName, content,
+                geometry, definition.minimumSize) != nullptr;
+            if (!added) content->deleteLater();
+        } else {
+            log(QStringLiteral("warning"),
+                tr("组件创建失败：%1").arg(error));
+        }
+    }
+    if (added) {
+        return true;
+    }
+
+    return false;
 }
 
 void MainWindow::showLibraryComponent(const QString &componentId)
 {
-    QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
-    if (!workspace || componentId.trimmed().isEmpty()) return;
+    if (componentId.trimmed().isEmpty()) return;
 
-    const QList<QObject *> canvases = workspace->findChildren<QObject *>(
-        QStringLiteral("workspaceCanvas"));
-    for (QObject *canvas : canvases) {
-        bool added = false;
-        if (!QMetaObject::invokeMethod(
-                canvas, "addOrShowComponentAt", Qt::DirectConnection,
-                Q_RETURN_ARG(bool, added), Q_ARG(QString, componentId),
-                Q_ARG(QPoint, QPoint(-1, -1)))) {
-            continue;
-        }
-        if (added) {
-            if (m_componentLibraryDock) m_componentLibraryDock->hide();
-            if (m_componentsToggle) m_componentsToggle->setChecked(false);
-            return;
-        }
+    if (createRegisteredComponentAt(componentId, QPoint(-1, -1))) {
+        if (m_componentLibraryDock) m_componentLibraryDock->hide();
+        if (m_componentsToggle) m_componentsToggle->setChecked(false);
+        return;
+    }
+
+    WorkspaceUiProvider *provider = activeWorkspaceUiProvider();
+    const WorkspaceLibraryPresentation library = provider
+        ? provider->context().componentLibrary : WorkspaceLibraryPresentation{};
+    bool added = false;
+    const bool invoked = library.activationTarget
+        && !library.activationMethod.isEmpty()
+        && QMetaObject::invokeMethod(
+            library.activationTarget, library.activationMethod.constData(),
+            Qt::DirectConnection, Q_RETURN_ARG(bool, added),
+            Q_ARG(QString, componentId));
+    if (invoked && added) {
+        if (m_componentLibraryDock) m_componentLibraryDock->hide();
+        if (m_componentsToggle) m_componentsToggle->setChecked(false);
+        return;
     }
     log(QStringLiteral("warning"), tr("当前工作区不支持组件：%1").arg(componentId));
 }
 
-void MainWindow::detachTn160Trend()
+WorkspaceUiProvider *MainWindow::activeWorkspaceUiProvider() const
 {
-    if (!m_attachedTn160Trend) return;
-    if (m_outputTrendLayout) m_outputTrendLayout->removeWidget(m_attachedTn160Trend);
-    m_attachedTn160Trend->hide();
-    if (m_attachedTn160TrendOwner) {
-        m_attachedTn160Trend->setParent(m_attachedTn160TrendOwner);
+    QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
+    auto *contributor = workspace ? qobject_cast<IWorkspaceUiProvider *>(workspace)
+                                  : nullptr;
+    return contributor ? contributor->workspaceUiProvider() : nullptr;
+}
+
+void MainWindow::setDockTitle(QDockWidget *dock, const QString &title)
+{
+    if (!dock || title.isEmpty()) return;
+    dock->setWindowTitle(title);
+    const auto labels = dock->findChildren<QLabel *>(
+        QStringLiteral("dockTitle"), Qt::FindChildrenRecursively);
+    for (QLabel *label : labels) label->setText(title);
+}
+
+void MainWindow::detachPanelHeaderControl(
+    QWidget *header, HeaderControlAttachment &attachment)
+{
+    if (header) {
+        if (attachment.control) {
+            if (auto *layout = qobject_cast<QBoxLayout *>(header->layout())) {
+                layout->removeWidget(attachment.control);
+            }
+        }
+        if (auto *title = header->findChild<QLabel *>(QStringLiteral("dockTitle"))) {
+            title->show();
+        }
     }
-    m_attachedTn160Trend.clear();
-    m_attachedTn160TrendOwner.clear();
+    if (!attachment.control) {
+        attachment.owner.clear();
+        attachment.layoutIndex = -1;
+        return;
+    }
+
+    QWidget *control = attachment.control;
+    if (attachment.owner) {
+        QWidget *owner = attachment.owner;
+        control->setParent(owner);
+        if (auto *layout = qobject_cast<QBoxLayout *>(owner->layout())) {
+            layout->removeWidget(control);
+            const int restoreIndex = attachment.layoutIndex >= 0
+                ? std::min(attachment.layoutIndex, layout->count())
+                : 0;
+            layout->insertWidget(restoreIndex, control);
+            control->show();
+        } else {
+            control->hide();
+        }
+    } else {
+        control->hide();
+    }
+    attachment.control.clear();
+    attachment.owner.clear();
+    attachment.layoutIndex = -1;
+}
+
+void MainWindow::synchronizePanelHeaderControl(
+    QDockWidget *dock, QWidget *panel, QWidget *header,
+    const WorkspacePanelOptions &options,
+    HeaderControlAttachment &attachment)
+{
+    detachPanelHeaderControl(header, attachment);
+    QWidget *control = options.headerControl;
+    if (!dock || !panel || !header || !control || control == panel
+        || !panel->isAncestorOf(control)) return;
+
+    QWidget *owner = control->parentWidget();
+    auto *ownerLayout = owner
+        ? qobject_cast<QBoxLayout *>(owner->layout()) : nullptr;
+    const int ownerIndex = ownerLayout ? ownerLayout->indexOf(control) : -1;
+    auto *headerLayout = qobject_cast<QBoxLayout *>(header->layout());
+    if (!ownerLayout || ownerIndex < 0 || !headerLayout) return;
+
+    attachment.control = control;
+    attachment.owner = owner;
+    attachment.layoutIndex = ownerIndex;
+    if (dock->isFloating()) return;
+
+    ownerLayout->removeWidget(control);
+    control->setParent(header);
+    headerLayout->insertWidget(0, control, 1);
+    if (auto *title = header->findChild<QLabel *>(QStringLiteral("dockTitle"))) {
+        title->hide();
+    }
+    control->show();
+}
+
+void MainWindow::synchronizePanelHeaderControls()
+{
+    const WorkspaceUiPresentationOptions options = m_activeUiProvider
+        ? m_activeUiProvider->presentationOptions()
+        : WorkspaceUiPresentationOptions{};
+    synchronizePanelHeaderControl(m_navigationDock, m_attachedContextPanel,
+                                  m_navigationDockHeader, options.contextPanel,
+                                  m_contextHeaderAttachment);
+    synchronizePanelHeaderControl(m_inspectorDock, m_attachedInspectorPanel,
+                                  m_inspectorDockHeader, options.inspectorPanel,
+                                  m_inspectorHeaderAttachment);
+    synchronizePanelHeaderControl(m_outputDock, m_attachedOutputPanel,
+                                  m_outputDockHeader, options.outputPanel,
+                                  m_outputHeaderAttachment);
+}
+
+void MainWindow::detachWorkspaceHeaderControls()
+{
+    detachPanelHeaderControl(m_navigationDockHeader, m_contextHeaderAttachment);
+    detachPanelHeaderControl(m_inspectorDockHeader, m_inspectorHeaderAttachment);
+    detachPanelHeaderControl(m_outputDockHeader, m_outputHeaderAttachment);
+}
+
+void MainWindow::detachWorkspacePanels()
+{
+    detachWorkspaceHeaderControls();
+    const auto detach = [](QPointer<QWidget> &content,
+                           QPointer<QWidget> &owner,
+                           QVBoxLayout *layout) {
+        if (!content) {
+            owner.clear();
+            return;
+        }
+        if (layout) layout->removeWidget(content);
+        content->hide();
+        if (owner) content->setParent(owner);
+        content.clear();
+        owner.clear();
+    };
+    detach(m_attachedContextPanel, m_attachedContextPanelOwner,
+           m_contextContributionLayout);
+    detach(m_attachedInspectorPanel, m_attachedInspectorPanelOwner,
+           m_inspectorContributionLayout);
+    detach(m_attachedOutputPanel, m_attachedOutputPanelOwner,
+           m_outputTrendLayout);
+    m_activeUiProvider.clear();
     if (m_outputTrendEmpty) m_outputTrendEmpty->show();
 }
 
 void MainWindow::synchronizeContextPanels()
 {
-    QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
-    bool tn160Live = false;
-    QWidget *livePage = nullptr;
-    if (workspace && workspace->objectName() == QStringLiteral("instrumentWorkspace")) {
-        int page = -1;
-        QMetaObject::invokeMethod(workspace, "currentPageIndex", Qt::DirectConnection,
-                                  Q_RETURN_ARG(int, page));
-        tn160Live = page == 1;
-        livePage = workspace->findChild<QWidget *>(QStringLiteral("tn160LivePage"));
+    synchronizeComponentRegistry();
+    WorkspaceUiProvider *provider = activeWorkspaceUiProvider();
+    detachWorkspacePanels();
+    if (provider) {
+        QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
+        QString contractError;
+        if (!validateWorkspaceContract(workspace, &contractError)) {
+            log(QStringLiteral("error"),
+                tr("组件 UI Context 不符合宿主模板：%1").arg(contractError));
+            setStatus(tr("组件 UI Context 已拒绝 · %1").arg(contractError));
+            provider = nullptr;
+        }
     }
+    m_activeUiProvider = provider;
 
-    const bool showMetrics = tn160Live && livePage;
-    if (m_liveMetrics) m_liveMetrics->setVisible(showMetrics);
+    const WorkspaceUiContext context = provider ? provider->context()
+                                                 : WorkspaceUiContext{};
+    const WorkspaceUiPresentationOptions presentationOptions =
+        provider ? provider->presentationOptions()
+                 : WorkspaceUiPresentationOptions{};
+    const auto attach = [this](const WorkspacePanelPresentation &panel,
+                                const WorkspacePanelOptions &options,
+                                const WorkspacePanelSlot slot,
+                                QWidget *host, QVBoxLayout *layout,
+                                QPointer<QWidget> &attached,
+                                QPointer<QWidget> &owner) {
+        if (!panel.content || !host || !layout) return false;
+        const bool standardMargins = options.margins == WorkspacePanelMargins::Standard
+            || (options.margins == WorkspacePanelMargins::Default
+                && slot != WorkspacePanelSlot::Output);
+        layout->setContentsMargins(standardMargins ? 12 : 0,
+                                   standardMargins ? 10 : 0,
+                                   standardMargins ? 12 : 0,
+                                   standardMargins ? 12 : 0);
+        owner = panel.content->parentWidget();
+        panel.content->setParent(host);
+        layout->addWidget(panel.content, 1);
+        attached = panel.content;
+        const bool dark = property("darkMode").toBool();
+        const auto applyPanelTheme = [dark](QWidget *widget) {
+            if (!widget) return;
+            widget->setProperty("darkMode", dark);
+            widget->style()->unpolish(widget);
+            widget->style()->polish(widget);
+            widget->update();
+        };
+        applyPanelTheme(panel.content);
+        for (QWidget *child : panel.content->findChildren<QWidget *>()) {
+            applyPanelTheme(child);
+        }
+        panel.content->show();
+        return true;
+    };
+
+    const bool hasContext = attach(context.contextPanel,
+                                   presentationOptions.contextPanel,
+                                   WorkspacePanelSlot::Context,
+                                   m_contextContributionHost,
+                                   m_contextContributionLayout,
+                                   m_attachedContextPanel,
+                                   m_attachedContextPanelOwner);
+    if (m_contextContributionHost) m_contextContributionHost->setVisible(hasContext);
+    if (m_contextFallback) m_contextFallback->setVisible(!hasContext);
+    setDockTitle(m_navigationDock,
+                 hasContext && !context.contextPanel.title.isEmpty()
+                     ? context.contextPanel.title : tr("设备连接"));
+
+    const bool hasInspector = attach(context.inspectorPanel,
+                                     presentationOptions.inspectorPanel,
+                                     WorkspacePanelSlot::Inspector,
+                                     m_inspectorContributionHost,
+                                     m_inspectorContributionLayout,
+                                     m_attachedInspectorPanel,
+                                     m_attachedInspectorPanelOwner);
+    if (m_inspectorBodyLayout) {
+        m_inspectorBodyLayout->setContentsMargins(hasInspector ? 0 : 12,
+                                                   hasInspector ? 0 : 10,
+                                                   hasInspector ? 0 : 12,
+                                                   hasInspector ? 0 : 12);
+        m_inspectorBodyLayout->setSpacing(hasInspector ? 0 : 8);
+    }
+    if (m_inspectorContributionHost) m_inspectorContributionHost->setVisible(hasInspector);
     for (QWidget *generic : {static_cast<QWidget *>(m_inspectorName),
                              static_cast<QWidget *>(m_inspectorDescription),
                              static_cast<QWidget *>(m_inspectorMeta),
                              static_cast<QWidget *>(m_inspectorCapabilities)}) {
-        if (generic) generic->setVisible(!showMetrics);
+        if (generic) generic->setVisible(!hasInspector);
     }
+    setDockTitle(m_inspectorDock,
+                 hasInspector && !context.inspectorPanel.title.isEmpty()
+                     ? context.inspectorPanel.title : tr("数据与属性"));
 
-    if (tn160Live && livePage && m_outputTrendHost && m_outputTrendLayout) {
-        QWidget *trend = livePage->findChild<QWidget *>(QStringLiteral("tn160TrendWidget"));
-        if (trend && m_attachedTn160Trend != trend) {
-            detachTn160Trend();
-            m_attachedTn160TrendOwner = livePage;
-            trend->setParent(m_outputTrendHost);
-            m_outputTrendLayout->addWidget(trend, 1);
-            m_attachedTn160Trend = trend;
-            trend->setProperty("darkMode", property("darkMode").toBool());
-            trend->show();
-            if (m_outputTrendEmpty) m_outputTrendEmpty->hide();
-        }
-        if (m_outputStack) m_outputStack->setCurrentWidget(m_outputTrendHost);
-    } else {
-        detachTn160Trend();
-        if (m_outputStack) m_outputStack->setCurrentWidget(m_output);
+    const bool hasOutput = attach(context.outputPanel,
+                                  presentationOptions.outputPanel,
+                                  WorkspacePanelSlot::Output,
+                                  m_outputTrendHost,
+                                  m_outputTrendLayout,
+                                  m_attachedOutputPanel,
+                                  m_attachedOutputPanelOwner);
+    if (m_outputTrendEmpty) m_outputTrendEmpty->setVisible(!hasOutput);
+    if (m_outputStack) {
+        m_outputStack->setCurrentWidget(hasOutput ? m_outputTrendHost : m_output);
     }
+    const QString outputTitle = hasOutput && !context.outputPanel.title.isEmpty()
+        ? context.outputPanel.title : tr("输出终端");
+    setDockTitle(m_outputDock, outputTitle);
+    synchronizePanelHeaderControls();
+    if (m_outputClear) {
+        const bool clearable = hasOutput && context.outputPanel.clearTarget
+            && !context.outputPanel.clearMethod.isEmpty();
+        m_outputClear->setVisible(!hasOutput || clearable);
+        m_outputClear->setText(clearable ? tr("清空诊断") : tr("清空"));
+        m_outputClear->setToolTip(clearable ? tr("清空当前工作区诊断历史")
+                                             : tr("清空终端输出"));
+    }
+    if (m_outputToggle) m_outputToggle->setToolTip(outputTitle);
     refreshComponentLibrary();
-}
-
-void MainWindow::updateTn160Telemetry(const QString &center, const QString &ntc,
-                                      const QString &centerAdu, const QString &vtemp,
-                                      const QString &fps)
-{
-    if (m_liveCenter) m_liveCenter->setText(center);
-    if (m_liveNtc) m_liveNtc->setText(ntc);
-    if (m_liveCenterAdu) m_liveCenterAdu->setText(centerAdu);
-    if (m_liveVtemp) m_liveVtemp->setText(vtemp);
-    if (m_liveFps) m_liveFps->setText(fps);
-}
-
-void MainWindow::toggleConnection()
-{
-    QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
-    if (!workspace) return;
-    QObject *target = nullptr;
-    const char *method = nullptr;
-    int tn160Page = -1;
-    if (workspace->objectName() == QStringLiteral("serialScopeWorkspace")) {
-        target = workspace;
-        method = "toggleConnection";
-    } else if (workspace->objectName() == QStringLiteral("instrumentWorkspace")) {
-        QMetaObject::invokeMethod(workspace, "currentPageIndex", Qt::DirectConnection,
-                                  Q_RETURN_ARG(int, tn160Page));
-        if (tn160Page == 1) {
-            target = workspace->findChild<QObject *>(QStringLiteral("tn160LivePage"));
-            method = "toggleCapture";
-        } else if (tn160Page == 2) {
-            target = workspace->findChild<QObject *>(QStringLiteral("tn160CalibrationPage"));
-            method = "startTransfer";
-        } else if (tn160Page == 3) {
-            target = workspace->findChild<QObject *>(QStringLiteral("tn160CalibrationDataPage"));
-            method = "startTransfer";
-        } else {
-            return;
-        }
-    }
-    if (!target || !method) return;
-
-    // The visible host controls are proxies for hidden plugin-owned controls.
-    // Synchronize immediately before opening so an editable, manually entered
-    // port (for example COM28) cannot be lost to signal timing or a refresh.
-    const QString port = m_connectionPort ? m_connectionPort->currentText().trimmed()
-                                          : QString();
-    if (!port.isEmpty()) {
-        QMetaObject::invokeMethod(target, "setPort", Qt::DirectConnection,
-                                  Q_ARG(QString, port));
-    }
-    if (workspace->objectName() == QStringLiteral("serialScopeWorkspace")) {
-        if (m_connectionBaud) {
-            QMetaObject::invokeMethod(target, "setBaud", Qt::DirectConnection,
-                                      Q_ARG(int, m_connectionBaud->value()));
-        }
-        if (m_connectionEngine) {
-            const QString engine = m_connectionEngine->currentData().toString();
-            if (!engine.isEmpty()) {
-                QMetaObject::invokeMethod(target, "setEngine", Qt::DirectConnection,
-                                          Q_ARG(QString, engine));
-            }
-        }
-    } else if (tn160Page == 1 && m_connectionBaud) {
-        QMetaObject::invokeMethod(target, "setBaud", Qt::DirectConnection,
-                                  Q_ARG(int, m_connectionBaud->value()));
-    } else if ((tn160Page == 2 || tn160Page == 3)) {
-        if (m_connectionTriggerBaud) {
-            QMetaObject::invokeMethod(target, "setTriggerBaud", Qt::DirectConnection,
-                                      Q_ARG(int, m_connectionTriggerBaud->value()));
-        }
-        if (m_connectionReadBaud) {
-            QMetaObject::invokeMethod(target, "setReadBaud", Qt::DirectConnection,
-                                      Q_ARG(int, m_connectionReadBaud->value()));
-        }
-    }
-    QMetaObject::invokeMethod(target, method, Qt::QueuedConnection);
-}
-
-void MainWindow::updateCalibrationState(const QString &state, const QString &text)
-{
-    if (!m_connectionState || !m_connectionToggle) return;
-    if (QObject *origin = sender(); origin && origin != connectionTargetForCurrentWorkspace()) {
-        return;
-    }
-    m_connectionState->setText(text);
-    m_connectionState->setProperty("state", state);
-    m_connectionState->style()->unpolish(m_connectionState);
-    m_connectionState->style()->polish(m_connectionState);
-    const bool running = state == QStringLiteral("running");
-    int page = -1;
-    if (m_stack && m_stack->currentWidget()
-        && m_stack->currentWidget()->objectName() == QStringLiteral("instrumentWorkspace")) {
-        QMetaObject::invokeMethod(m_stack->currentWidget(), "currentPageIndex",
-                                  Qt::DirectConnection, Q_RETURN_ARG(int, page));
-    }
-    const bool dump = page == 3;
-    setConnectionConfigurationEnabled(true, false, true, running);
-    m_connectionToggle->setText(dump ? tr("读取标定数据") : tr("开始标定"));
-    m_connectionToggle->setEnabled(!running);
-}
-
-void MainWindow::updateFirmwareState(const QString &path, const QString &status,
-                                     const bool monitoring)
-{
-    if (!m_firmwarePath || !m_firmwareState || !m_firmwareMonitor) return;
-    m_firmwarePath->setText(path.isEmpty() ? tr("尚未选择 UF2")
-                                           : QDir::toNativeSeparators(path));
-    m_firmwarePath->setToolTip(path);
-    m_firmwareState->setText(status.isEmpty() ? tr("等待选择 UF2") : status);
-    m_firmwareState->setProperty("state", monitoring ? QStringLiteral("connecting")
-                                                      : path.isEmpty()
-                                                          ? QStringLiteral("disabled")
-                                                          : QStringLiteral("installed"));
-    m_firmwareState->style()->unpolish(m_firmwareState);
-    m_firmwareState->style()->polish(m_firmwareState);
-    m_firmwareChoose->setEnabled(!monitoring);
-    m_firmwareMonitor->setText(monitoring ? tr("停止监听") : tr("开始监听"));
-    m_firmwareMonitor->setEnabled(!path.isEmpty() || monitoring);
-    m_firmwareMonitor->setProperty("kind", monitoring ? QStringLiteral("warning")
-                                                       : QStringLiteral("primary"));
-    m_firmwareMonitor->style()->unpolish(m_firmwareMonitor);
-    m_firmwareMonitor->style()->polish(m_firmwareMonitor);
-}
-
-void MainWindow::updateRawCaptureState(const QString &state, const QString &text)
-{
-    if (!m_tnRawCapture) return;
-    if (QObject *origin = sender(); origin && origin != connectionTargetForCurrentWorkspace()) {
-        return;
-    }
-    const bool capturing = state == QStringLiteral("raw-capturing");
-    const bool restoring = state == QStringLiteral("raw-restoring");
-    if (capturing) {
-        m_tnRawCapture->setText(tr("停止原始采集"));
-        m_tnRawCapture->setProperty("kind", QStringLiteral("warning"));
-    } else if (restoring) {
-        m_tnRawCapture->setText(tr("恢复监控中"));
-        m_tnRawCapture->setProperty("kind", QStringLiteral("quiet"));
-    } else {
-        m_tnRawCapture->setText(tr("采集原始帧"));
-        m_tnRawCapture->setProperty("kind", QStringLiteral("quiet"));
-    }
-    m_tnRawCapture->setEnabled(!restoring);
-    m_tnRawCapture->style()->unpolish(m_tnRawCapture);
-    m_tnRawCapture->style()->polish(m_tnRawCapture);
-    if (m_connectionState && (capturing || restoring)) {
-        m_connectionState->setText(text);
-    }
-}
-
-void MainWindow::updateConnectionState(const QString &state, const QString &text)
-{
-    if (!m_connectionState || !m_connectionToggle) return;
-    if (QObject *origin = sender(); origin && origin != connectionTargetForCurrentWorkspace()) {
-        return;
-    }
-    m_connectionState->setText(text);
-    m_connectionState->setProperty("state", state);
-    m_connectionState->style()->unpolish(m_connectionState);
-    m_connectionState->style()->polish(m_connectionState);
-    const bool serial = m_stack && m_stack->currentWidget()
-        && m_stack->currentWidget()->objectName() == QStringLiteral("serialScopeWorkspace");
-    const bool active = state == QStringLiteral("connected")
-        || state == QStringLiteral("raw-capturing")
-        || state == QStringLiteral("raw-restoring");
-    const bool changing = state == QStringLiteral("connecting")
-        || state == QStringLiteral("disconnecting")
-        || state == QStringLiteral("raw-restoring");
-    const bool locked = state != QStringLiteral("disconnected")
-        && (state != QStringLiteral("error")
-            || connectionTargetActive(connectionTargetForCurrentWorkspace()));
-    setConnectionConfigurationEnabled(true, serial, false, locked);
-    m_connectionToggle->setText(active ? (serial ? tr("断开") : tr("停止采集"))
-                                        : serial ? tr("连接") : tr("开始采集"));
-    m_connectionToggle->setEnabled(!changing);
 }
 
 void MainWindow::toggleDarkMode()
@@ -2521,9 +2589,192 @@ void MainWindow::applyDefaultDockLayout()
     m_componentLibraryDock->hide();
     m_inspectorDock->hide();
     m_outputDock->hide();
-    m_workbenchWindow->resizeDocks({m_navigationDock}, {220}, Qt::Horizontal);
-    m_workbenchWindow->resizeDocks({m_inspectorDock}, {220}, Qt::Horizontal);
-    m_centerWorkbenchWindow->resizeDocks({m_outputDock}, {156}, Qt::Vertical);
+    resizeSideDocksForPage(PageLayoutPreset{});
+}
+
+QString MainWindow::currentPageLayoutContext() const
+{
+    WorkspaceUiProvider *provider = m_activeUiProvider;
+    return provider ? provider->context().id : QString{};
+}
+
+WorkspaceLayoutProfile MainWindow::currentLayoutProfile() const
+{
+    WorkspaceUiProvider *provider = m_activeUiProvider;
+    return provider ? provider->context().layoutProfile
+                    : WorkspaceLayoutProfile::Standard;
+}
+
+MainWindow::PageLayoutPreset MainWindow::defaultPageLayout(
+    const QString &context) const
+{
+    switch (m_pageLayoutProfiles.value(context, WorkspaceLayoutProfile::Standard)) {
+    case WorkspaceLayoutProfile::FirmwareTask:
+        return {0.36, true, false, SidePanelDefaultWidth};
+    case WorkspaceLayoutProfile::CompactTask:
+        return {0.38, true, false, SidePanelDefaultWidth};
+    case WorkspaceLayoutProfile::Diagnostics:
+        return {0.60, true, true, SidePanelDefaultWidth};
+    case WorkspaceLayoutProfile::CalibrationTask:
+        return {0.55, true, true, SidePanelDefaultWidth};
+    case WorkspaceLayoutProfile::Standard:
+        return {0.40, true, false, SidePanelDefaultWidth};
+    }
+    return {};
+}
+
+MainWindow::PageLayoutPreset MainWindow::storedPageLayout(
+    const QString &context) const
+{
+    PageLayoutPreset layout = defaultPageLayout(context);
+    if (context.isEmpty()) return layout;
+    QSettings settings;
+    settings.beginGroup(PageLayoutSettingsGroup + QLatin1Char('/') + context);
+    layout.outputFraction = std::clamp(
+        settings.value(QStringLiteral("outputFraction"), layout.outputFraction)
+            .toDouble(), 0.20, 0.78);
+    layout.outputVisible = settings.value(
+        QStringLiteral("outputVisible"), layout.outputVisible).toBool();
+    layout.inspectorVisible = settings.value(
+        QStringLiteral("inspectorVisible"), layout.inspectorVisible).toBool();
+    const int legacyWidth = settings.value(QStringLiteral("inspectorWidth"),
+                                           layout.sidePanelWidth).toInt();
+    layout.sidePanelWidth = std::clamp(
+        settings.value(QStringLiteral("sidePanelWidth"), legacyWidth).toInt(),
+        SidePanelMinimumWidth, SidePanelMaximumWidth);
+    return layout;
+}
+
+void MainWindow::savePageLayout(const QString &context)
+{
+    if (!m_pageLayoutsReady || m_applyingPageLayout || context.isEmpty()
+        || !m_outputDock || !m_inspectorDock) {
+        return;
+    }
+    PageLayoutPreset layout = storedPageLayout(context);
+    const PageLayoutPreset recommended = defaultPageLayout(context);
+    layout.outputVisible = !m_outputDock->isHidden();
+    layout.inspectorVisible = !m_inspectorDock->isHidden();
+    if (layout.outputVisible && !m_outputDock->isFloating()
+        && m_centerWorkbenchWindow) {
+        const int referenceHeight = m_centerWorkbenchWindow->contentsRect().height();
+        if (referenceHeight > 100 && m_outputDock->height() > 40) {
+            layout.outputFraction = std::clamp(
+                qreal(m_outputDock->height()) / qreal(referenceHeight), 0.20, 0.78);
+        }
+    }
+    QDockWidget *widthSource = nullptr;
+    if (layout.inspectorVisible && !m_inspectorDock->isFloating()) {
+        widthSource = m_inspectorDock;
+    } else if (m_navigationDock && !m_navigationDock->isHidden()
+               && !m_navigationDock->isFloating()) {
+        widthSource = m_navigationDock;
+    }
+    if (widthSource && widthSource->width() >= SidePanelMinimumWidth) {
+        layout.sidePanelWidth = std::clamp(widthSource->width(),
+                                           SidePanelMinimumWidth,
+                                           SidePanelMaximumWidth);
+    }
+
+    const bool customized = std::abs(layout.outputFraction
+                                     - recommended.outputFraction) > 0.015
+        || layout.outputVisible != recommended.outputVisible
+        || layout.inspectorVisible != recommended.inspectorVisible
+        || std::abs(layout.sidePanelWidth - recommended.sidePanelWidth) > 8;
+    QSettings settings;
+    const QString group = PageLayoutSettingsGroup + QLatin1Char('/') + context;
+    settings.remove(group);
+    if (!customized) return;
+    settings.beginGroup(group);
+    settings.setValue(QStringLiteral("outputFraction"), layout.outputFraction);
+    settings.setValue(QStringLiteral("outputVisible"), layout.outputVisible);
+    settings.setValue(QStringLiteral("inspectorVisible"), layout.inspectorVisible);
+    settings.setValue(QStringLiteral("sidePanelWidth"), layout.sidePanelWidth);
+}
+
+void MainWindow::switchPageLayoutContext()
+{
+    if (!m_pageLayoutsReady) return;
+    const QString context = currentPageLayoutContext();
+    if (context == m_pageLayoutContext) return;
+    savePageLayout(m_pageLayoutContext);
+    if (!context.isEmpty()) m_pageLayoutProfiles[context] = currentLayoutProfile();
+    m_pageLayoutContext = context;
+    ++m_pageLayoutRevision;
+    if (!context.isEmpty()) applyPageLayout(context, storedPageLayout(context));
+}
+
+void MainWindow::applyPageLayout(const QString &context,
+                                 const PageLayoutPreset &layout)
+{
+    if (context.isEmpty() || !m_outputDock || !m_inspectorDock) return;
+    const quint64 revision = ++m_pageLayoutRevision;
+    m_applyingPageLayout = true;
+    m_outputDock->setVisible(layout.outputVisible);
+    m_inspectorDock->setVisible(layout.inspectorVisible);
+    if (m_workbenchWindow) {
+        resizeSideDocksForPage(layout);
+    }
+    if (layout.outputVisible && !m_outputDock->isFloating()
+        && m_centerWorkbenchWindow) {
+        int referenceHeight = m_centerWorkbenchWindow->contentsRect().height();
+        if (referenceHeight < 100) referenceHeight = height();
+        m_centerWorkbenchWindow->resizeDocks(
+            {m_outputDock}, {std::max(1, qRound(referenceHeight
+                                                * layout.outputFraction))},
+            Qt::Vertical);
+    }
+    m_applyingPageLayout = false;
+
+    QTimer::singleShot(0, this, [this, context, revision] {
+        if (revision != m_pageLayoutRevision || context != m_pageLayoutContext) return;
+        const PageLayoutPreset settled = storedPageLayout(context);
+        const bool applying = m_applyingPageLayout;
+        m_applyingPageLayout = true;
+        if (settled.inspectorVisible && !m_inspectorDock->isFloating()) {
+            resizeSideDocksForPage(settled);
+        }
+        m_applyingPageLayout = applying;
+        resizeOutputDockForCurrentPage();
+    });
+}
+
+void MainWindow::resizeSideDocksForPage(const PageLayoutPreset &layout)
+{
+    if (!m_workbenchWindow) return;
+    QList<QDockWidget *> docks;
+    QList<int> widths;
+    if (m_inspectorDock && !m_inspectorDock->isHidden()
+        && !m_inspectorDock->isFloating()) {
+        docks.append(m_inspectorDock);
+        widths.append(layout.sidePanelWidth);
+    }
+    if (m_navigationDock && !m_navigationDock->isHidden()
+        && !m_navigationDock->isFloating()) {
+        docks.append(m_navigationDock);
+        widths.append(layout.sidePanelWidth);
+    }
+    if (!docks.isEmpty()) {
+        m_workbenchWindow->resizeDocks(docks, widths, Qt::Horizontal);
+    }
+}
+
+void MainWindow::resizeOutputDockForCurrentPage()
+{
+    if (m_pageLayoutContext.isEmpty() || !m_outputDock
+        || m_outputDock->isHidden() || m_outputDock->isFloating()
+        || !m_centerWorkbenchWindow) {
+        return;
+    }
+    int referenceHeight = m_centerWorkbenchWindow->contentsRect().height();
+    if (referenceHeight < 100) referenceHeight = height();
+    const qreal fraction = storedPageLayout(m_pageLayoutContext).outputFraction;
+    const bool applying = m_applyingPageLayout;
+    m_applyingPageLayout = true;
+    m_centerWorkbenchWindow->resizeDocks(
+        {m_outputDock}, {std::max(1, qRound(referenceHeight * fraction))},
+        Qt::Vertical);
+    m_applyingPageLayout = applying;
 }
 
 void MainWindow::paintEvent(QPaintEvent *event)
@@ -2563,6 +2814,15 @@ void MainWindow::resizeEvent(QResizeEvent *event)
     };
     reflowCards(m_homeGrid, true, false, &m_homeCardColumns);
     reflowCards(m_componentGrid, false, true, &m_componentCardColumns);
+
+    if (m_pageLayoutsReady && !m_applyingPageLayout && m_outputDock
+        && !m_outputDock->isHidden() && !m_outputDock->isFloating()) {
+        const quint64 revision = ++m_pageLayoutRevision;
+        QTimer::singleShot(0, this, [this, revision] {
+            if (revision != m_pageLayoutRevision) return;
+            resizeOutputDockForCurrentPage();
+        });
+    }
 
 #ifdef Q_OS_WIN
     if (isMaximized()) {

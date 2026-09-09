@@ -27,6 +27,7 @@ public:
     ~ComponentManager() override;
 
     [[nodiscard]] static QString defaultStorePath();
+    [[nodiscard]] static QString packagedStorePath();
     [[nodiscard]] QString storePath() const;
     [[nodiscard]] QList<ComponentSnapshot> components() const;
     [[nodiscard]] ComponentSnapshot component(const QString &id) const;

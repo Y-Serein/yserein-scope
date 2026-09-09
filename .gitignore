@@ -1,7 +1,5 @@
 # CMake / Qt / IDE build products
 /build/
-/build-*/
-/build-win/
 /out/
 /dist/
 /CMakeFiles/

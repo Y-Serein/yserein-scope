@@ -1,11 +1,14 @@
 #include <serein/scope/SerialTransport.h>
 
+#include "SerialTransmitQueue.h"
+
 #include <QtCore/QDir>
 #include <QtCore/QFile>
 #include <QtCore/QMutex>
 #include <QtCore/QMutexLocker>
 #include <QtCore/QQueue>
 #include <QtCore/QRegularExpression>
+#include <QtCore/QSettings>
 #include <QtCore/QSet>
 #include <QtCore/QThread>
 #include <QtCore/QHash>
@@ -16,6 +19,7 @@
 #include <cerrno>
 #include <cstring>
 #include <cwchar>
+#include <stdexcept>
 
 #ifdef Q_OS_WIN
 #  include <windows.h>
@@ -33,6 +37,26 @@ namespace {
 
 QMutex g_leaseMutex;
 QSet<QString> g_leasedPorts;
+
+constexpr auto MaxPendingReceiveBytesKey =
+    "runtime/serial/max-pending-receive-bytes";
+constexpr auto MaxReceiveChunksPerDrainKey =
+    "runtime/serial/max-receive-chunks-per-drain";
+constexpr auto MaxPendingTransmitBytesKey =
+    "runtime/serial/max-pending-transmit-bytes";
+
+template<typename Value>
+Value boundedSetting(const QSettings &settings, const char *key,
+                     const Value fallback, const Value minimum,
+                     const Value maximum)
+{
+    bool valid = false;
+    const qlonglong raw = settings.value(QString::fromLatin1(key),
+                                         qlonglong(fallback)).toLongLong(&valid);
+    if (!valid) return fallback;
+    return Value(std::clamp<qlonglong>(raw, qlonglong(minimum),
+                                      qlonglong(maximum)));
+}
 
 QString leaseKey(const QString &port)
 {
@@ -80,12 +104,23 @@ QString windowsError(const DWORD code)
 
 } // namespace
 
+class SerialTransport::Ingress final {
+public:
+    mutable QMutex mutex;
+    QQueue<QByteArray> chunks;
+    SerialTransportStats stats;
+    bool drainScheduled = false;
+    bool overflowReported = false;
+};
+
 class SerialWorker final : public QThread {
     Q_OBJECT
 
 public:
-    explicit SerialWorker(SerialConfig config, QObject *parent = nullptr)
-        : QThread(parent), m_config(std::move(config))
+    explicit SerialWorker(SerialConfig config, const qsizetype maxPendingTxBytes,
+                          QObject *parent = nullptr)
+        : QThread(parent), m_config(std::move(config)),
+          m_transmitQueue(maxPendingTxBytes)
     {
     }
 
@@ -94,22 +129,20 @@ public:
         if (m_drainBeforeStop.load(std::memory_order_acquire)) {
             return;
         }
+        m_transmitQueue.stopAccepting();
         m_stop.store(true, std::memory_order_release);
     }
 
     void requestStopAfterWrites()
     {
+        m_transmitQueue.stopAccepting();
         m_drainBeforeStop.store(true, std::memory_order_release);
         m_stop.store(true, std::memory_order_release);
     }
 
-    void enqueue(const QByteArray &data)
+    bool enqueue(const QByteArray &data)
     {
-        if (data.isEmpty()) {
-            return;
-        }
-        QMutexLocker lock(&m_txMutex);
-        m_tx.enqueue(data);
+        return m_transmitQueue.enqueue(data);
     }
 
 signals:
@@ -140,16 +173,6 @@ protected:
     }
 
 private:
-    QList<QByteArray> takePendingWrites()
-    {
-        QList<QByteArray> result;
-        QMutexLocker lock(&m_txMutex);
-        while (!m_tx.isEmpty()) {
-            result.append(m_tx.dequeue());
-        }
-        return result;
-    }
-
     [[nodiscard]] bool shouldDrainWrites() const
     {
         return m_drainBeforeStop.load(std::memory_order_acquire);
@@ -162,12 +185,12 @@ private:
 
     [[nodiscard]] bool hasPendingWrites()
     {
-        QMutexLocker lock(&m_txMutex);
-        return !m_tx.isEmpty();
+        return m_transmitQueue.hasPending();
     }
 
     void stopImmediately()
     {
+        m_transmitQueue.stopAccepting();
         m_drainBeforeStop.store(false, std::memory_order_release);
         m_stop.store(true, std::memory_order_release);
     }
@@ -234,7 +257,8 @@ private:
             if (stopRequested() && !shouldDrainWrites()) {
                 break;
             }
-            for (const QByteArray &payload : takePendingWrites()) {
+            if (const std::optional<QByteArray> pending = m_transmitQueue.takeNext()) {
+                const QByteArray &payload = *pending;
                 qsizetype offset = 0;
                 while (offset < payload.size()) {
                     if (stopRequested() && !shouldDrainWrites()) {
@@ -258,9 +282,6 @@ private:
                 }
                 if (offset == payload.size()) {
                     emit transmitted(qint64(offset));
-                }
-                if (stopRequested()) {
-                    break;
                 }
             }
             if (stopRequested()) {
@@ -338,7 +359,8 @@ private:
             if (stopRequested() && !shouldDrainWrites()) {
                 break;
             }
-            for (const QByteArray &payload : takePendingWrites()) {
+            if (const std::optional<QByteArray> pending = m_transmitQueue.takeNext()) {
+                const QByteArray &payload = *pending;
                 qsizetype offset = 0;
                 while (offset < payload.size()) {
                     if (stopRequested() && !shouldDrainWrites()) {
@@ -361,9 +383,6 @@ private:
                 }
                 if (offset == payload.size()) {
                     emit transmitted(qint64(offset));
-                }
-                if (stopRequested()) {
-                    break;
                 }
             }
             if (stopRequested()) {
@@ -399,13 +418,23 @@ private:
     SerialConfig m_config;
     std::atomic_bool m_stop{false};
     std::atomic_bool m_drainBeforeStop{false};
-    QMutex m_txMutex;
-    QQueue<QByteArray> m_tx;
+    detail::SerialTransmitQueue m_transmitQueue;
 };
 
 SerialTransport::SerialTransport(QObject *parent)
-    : QObject(parent)
+    : SerialTransport(configuredLimits(), parent)
 {
+}
+
+SerialTransport::SerialTransport(const SerialTransportLimits limits,
+                                 QObject *parent)
+    : QObject(parent), m_ingress(std::make_unique<Ingress>()), m_limits(limits)
+{
+    if (limits.maxPendingReceiveBytes <= 0
+        || limits.maxReceiveChunksPerDrain <= 0
+        || limits.maxPendingTransmitBytes <= 0) {
+        throw std::invalid_argument("SerialTransport limits must be positive");
+    }
     qRegisterMetaType<SerialConfig>();
 }
 
@@ -413,13 +442,44 @@ SerialTransport::~SerialTransport()
 {
     close();
     if (m_worker) {
-        m_worker->wait(1500);
+        m_worker->wait();
     }
+}
+
+SerialTransportLimits SerialTransport::configuredLimits()
+{
+    const QSettings settings;
+    return configuredLimits(settings);
+}
+
+SerialTransportLimits SerialTransport::configuredLimits(
+    const QSettings &settings)
+{
+    const SerialTransportLimits defaults;
+    SerialTransportLimits limits;
+    limits.maxPendingReceiveBytes = boundedSetting<qsizetype>(
+        settings, MaxPendingReceiveBytesKey, defaults.maxPendingReceiveBytes,
+        64 * 1024, 256 * 1024 * 1024);
+    limits.maxReceiveChunksPerDrain = boundedSetting<qsizetype>(
+        settings, MaxReceiveChunksPerDrainKey,
+        defaults.maxReceiveChunksPerDrain, 1, 1024);
+    limits.maxPendingTransmitBytes = boundedSetting<qsizetype>(
+        settings, MaxPendingTransmitBytesKey, defaults.maxPendingTransmitBytes,
+        1024, 64 * 1024 * 1024);
+    return limits;
 }
 
 bool SerialTransport::isActive() const noexcept
 {
     return m_worker && m_worker->isRunning();
+}
+
+SerialTransportStats SerialTransport::stats() const
+{
+    QMutexLocker lock(&m_ingress->mutex);
+    SerialTransportStats result = m_ingress->stats;
+    result.pendingReceiveBytes = m_ingress->stats.pendingReceiveBytes;
+    return result;
 }
 
 QList<SerialPortInfo> SerialTransport::availablePorts()
@@ -573,12 +633,28 @@ void SerialTransport::open(const SerialConfig &config)
         emit errorOccurred(tr("串口名称或波特率无效"));
         return;
     }
-    m_worker = new SerialWorker(config, this);
+    clearReceived();
+    m_worker = new SerialWorker(config, m_limits.maxPendingTransmitBytes, this);
+    SerialWorker *worker = m_worker;
     connect(m_worker, &SerialWorker::opened, this, [this] {
         emit stateChanged(QStringLiteral("connected"));
     });
-    connect(m_worker, &SerialWorker::received, this, &SerialTransport::dataReceived);
-    connect(m_worker, &SerialWorker::transmitted, this, &SerialTransport::bytesWritten);
+    connect(m_worker, &SerialWorker::received, this,
+            [this, worker](const QByteArray &data) {
+                if (!enqueueReceived(data)) worker->requestStop();
+            }, Qt::DirectConnection);
+    connect(m_worker, &SerialWorker::transmitted, this,
+            [this](const qint64 count) {
+                {
+                    QMutexLocker lock(&m_ingress->mutex);
+                    const qsizetype delivered = std::min(
+                        qsizetype(std::max<qint64>(count, 0)),
+                        m_ingress->stats.pendingTransmitBytes);
+                    m_ingress->stats.pendingTransmitBytes -= delivered;
+                    m_ingress->stats.transmittedBytes += quint64(delivered);
+                }
+                emit bytesWritten(count);
+            });
     connect(m_worker, &SerialWorker::failed, this, &SerialTransport::errorOccurred);
     connect(m_worker, &QThread::finished, this, &SerialTransport::workerFinished);
     emit stateChanged(QStringLiteral("connecting"));
@@ -605,15 +681,43 @@ void SerialTransport::closeAfterWrites()
 
 void SerialTransport::write(const QByteArray &data)
 {
+    if (data.isEmpty()) return;
     if (!isActive()) {
+        {
+            QMutexLocker lock(&m_ingress->mutex);
+            m_ingress->stats.rejectedTransmitBytes += quint64(data.size());
+        }
         emit errorOccurred(tr("串口尚未连接"));
         return;
     }
-    m_worker->enqueue(data);
+    if (!m_worker->enqueue(data)) {
+        {
+            QMutexLocker lock(&m_ingress->mutex);
+            m_ingress->stats.rejectedTransmitBytes += quint64(data.size());
+        }
+        emit errorOccurred(tr("串口发送队列已满，连接已停止以避免静默丢命令"));
+        m_worker->requestStop();
+        return;
+    }
+    {
+        QMutexLocker lock(&m_ingress->mutex);
+        m_ingress->stats.acceptedTransmitBytes += quint64(data.size());
+        m_ingress->stats.pendingTransmitBytes += data.size();
+        m_ingress->stats.transmitHighWaterBytes = std::max(
+            m_ingress->stats.transmitHighWaterBytes,
+            m_ingress->stats.pendingTransmitBytes);
+    }
 }
 
 void SerialTransport::workerFinished()
 {
+    while (stats().pendingReceiveBytes > 0) drainReceived();
+    {
+        QMutexLocker lock(&m_ingress->mutex);
+        m_ingress->stats.abandonedTransmitBytes += quint64(
+            m_ingress->stats.pendingTransmitBytes);
+        m_ingress->stats.pendingTransmitBytes = 0;
+    }
     auto *worker = qobject_cast<SerialWorker *>(sender());
     if (worker == m_worker) {
         m_worker = nullptr;
@@ -622,6 +726,87 @@ void SerialTransport::workerFinished()
         worker->deleteLater();
     }
     emit stateChanged(QStringLiteral("disconnected"));
+}
+
+bool SerialTransport::enqueueReceived(QByteArray data)
+{
+    if (data.isEmpty()) return true;
+    bool scheduleDrain = false;
+    bool reportOverflow = false;
+    {
+        QMutexLocker lock(&m_ingress->mutex);
+        if (data.size() > m_limits.maxPendingReceiveBytes
+                              - m_ingress->stats.pendingReceiveBytes) {
+            m_ingress->stats.rejectedReceiveBytes += quint64(data.size());
+            if (!m_ingress->overflowReported) {
+                m_ingress->overflowReported = true;
+                reportOverflow = true;
+            }
+        } else {
+            m_ingress->chunks.enqueue(std::move(data));
+            const qsizetype accepted = m_ingress->chunks.back().size();
+            m_ingress->stats.acceptedReceiveBytes += quint64(accepted);
+            m_ingress->stats.pendingReceiveBytes += accepted;
+            m_ingress->stats.receiveHighWaterBytes = std::max(
+                m_ingress->stats.receiveHighWaterBytes,
+                m_ingress->stats.pendingReceiveBytes);
+            if (!m_ingress->drainScheduled) {
+                m_ingress->drainScheduled = true;
+                scheduleDrain = true;
+            }
+        }
+    }
+    if (reportOverflow) {
+        QMetaObject::invokeMethod(this, [this] {
+            emit errorOccurred(
+                tr("串口接收队列已满，连接已停止以避免静默丢协议字节"));
+        }, Qt::QueuedConnection);
+        return false;
+    }
+    if (scheduleDrain) {
+        QMetaObject::invokeMethod(this, &SerialTransport::drainReceived,
+                                  Qt::QueuedConnection);
+    }
+    return true;
+}
+
+void SerialTransport::drainReceived()
+{
+    for (qsizetype count = 0; count < m_limits.maxReceiveChunksPerDrain; ++count) {
+        QByteArray data;
+        {
+            QMutexLocker lock(&m_ingress->mutex);
+            if (m_ingress->chunks.isEmpty()) break;
+            data = std::move(m_ingress->chunks.head());
+            m_ingress->chunks.dequeue();
+            m_ingress->stats.pendingReceiveBytes -= data.size();
+            m_ingress->stats.deliveredReceiveBytes += quint64(data.size());
+        }
+        emit dataReceived(data);
+    }
+
+    bool scheduleAgain = false;
+    {
+        QMutexLocker lock(&m_ingress->mutex);
+        if (m_ingress->chunks.isEmpty()) {
+            m_ingress->drainScheduled = false;
+        } else {
+            scheduleAgain = true;
+        }
+    }
+    if (scheduleAgain) {
+        QMetaObject::invokeMethod(this, &SerialTransport::drainReceived,
+                                  Qt::QueuedConnection);
+    }
+}
+
+void SerialTransport::clearReceived()
+{
+    QMutexLocker lock(&m_ingress->mutex);
+    m_ingress->chunks.clear();
+    m_ingress->stats = {};
+    m_ingress->drainScheduled = false;
+    m_ingress->overflowReported = false;
 }
 
 } // namespace serein::scope

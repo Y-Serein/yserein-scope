@@ -12,29 +12,38 @@ namespace serein::scope::tn160 {
 class CalibrationPage;
 class FirmwarePage;
 class LivePage;
+class ProductionCalibrationPage;
 
-class Tn160Workspace final : public QWidget, public IDeviceWorkspace {
+class Tn160Workspace final : public QWidget, public IDeviceWorkspace,
+                             public IWorkspaceUiProvider {
     Q_OBJECT
-    Q_INTERFACES(serein::scope::IDeviceWorkspace)
+    Q_INTERFACES(serein::scope::IDeviceWorkspace
+                 serein::scope::IWorkspaceUiProvider)
 
 public:
     explicit Tn160Workspace(IHostServices *host, QWidget *parent = nullptr);
     ~Tn160Workspace() override = default;
     void shutdown() override;
+    [[nodiscard]] WorkspaceUiProvider *workspaceUiProvider() override;
 
     Q_INVOKABLE int currentPageIndex() const;
+
+signals:
+    void pageAboutToChange(int previousIndex, int nextIndex);
 
 private slots:
     void selectPage(int index);
 
 private:
     IHostServices *m_host;
+    WorkspaceUiProvider *m_uiProvider = nullptr;
     QTabBar *m_tabs = nullptr;
     QStackedWidget *m_stack = nullptr;
     FirmwarePage *m_firmware = nullptr;
     LivePage *m_live = nullptr;
     CalibrationPage *m_calibrate = nullptr;
     CalibrationPage *m_dump = nullptr;
+    ProductionCalibrationPage *m_production = nullptr;
 };
 
 } // namespace serein::scope::tn160

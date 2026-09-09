@@ -25,7 +25,9 @@ WaveformWidget::WaveformWidget(QWidget *parent)
     setMinimumHeight(280);
 }
 
-void WaveformWidget::addSample(const QVector<double> &values, const QStringList &labels)
+void WaveformWidget::addSample(const QVector<double> &values,
+                               const QStringList &labels,
+                               const bool repaint)
 {
     while (m_series.size() < values.size()) {
         const int index = m_series.size();
@@ -41,6 +43,11 @@ void WaveformWidget::addSample(const QVector<double> &values, const QStringList 
             series.dequeue();
         }
     }
+    if (repaint) update();
+}
+
+void WaveformWidget::refreshDisplay()
+{
     update();
 }
 
@@ -63,6 +70,19 @@ void WaveformWidget::clear()
 QColor WaveformWidget::channelColor(const int index) const
 {
     return QColor(Colors.at(index % Colors.size()));
+}
+
+qreal WaveformWidget::lineWidth() const noexcept
+{
+    return m_lineWidth;
+}
+
+void WaveformWidget::setLineWidth(const qreal width)
+{
+    const qreal bounded = std::clamp(width, qreal(0.5), qreal(4.0));
+    if (qFuzzyCompare(m_lineWidth, bounded)) return;
+    m_lineWidth = bounded;
+    update();
 }
 
 void WaveformWidget::paintEvent(QPaintEvent *event)
@@ -153,7 +173,7 @@ void WaveformWidget::paintEvent(QPaintEvent *event)
                 started = true;
             }
         }
-        painter.setPen(QPen(channelColor(index), 1.35));
+        painter.setPen(QPen(channelColor(index), m_lineWidth));
         painter.drawPath(path);
     }
 }

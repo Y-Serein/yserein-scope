@@ -2,6 +2,9 @@
 
 #include "CoreExport.h"
 
+#include <QtCore/QByteArray>
+#include <QtCore/QList>
+#include <QtCore/QObject>
 #include <QtCore/QString>
 #include <QtCore/QStringList>
 #include <QtCore/QtPlugin>
@@ -10,9 +13,16 @@ class QWidget;
 
 namespace serein::scope {
 
+struct WorkspaceComponentDefinition;
+class IWorkspaceComponentProvider;
+
 inline constexpr int PluginInterfaceVersion = 2;
 inline constexpr auto DevicePluginIid = "com.serein.scope.IDevicePlugin/2.0";
 inline constexpr auto WorkspaceIid = "com.serein.scope.IDeviceWorkspace/1.0";
+inline constexpr auto WorkspaceUiProviderIid =
+    "com.serein.scope.IWorkspaceUiProvider/1.0";
+inline constexpr auto WorkspaceComponentProviderIid =
+    "com.serein.scope.IWorkspaceComponentProvider/1.0";
 
 struct PluginMetadata {
     QString id;
@@ -38,6 +48,106 @@ public:
     virtual void shutdown() = 0;
 };
 
+// Optional UI contribution contract. This is deliberately separate from the
+// ABI2 device/plugin interfaces: adding shell-facing UI content must not
+// change the existing plugin vtables. The host owns all docks, geometry,
+// visibility and splitter state; a component can only provide content for a
+// fixed semantic slot.
+enum class WorkspacePanelSlot {
+    Context,
+    Inspector,
+    Output,
+};
+
+// The host supplies the outer panel spacing. Default is Standard for side
+// panels and Flush for Output. A component can opt out for a scroll surface
+// that already owns its content inset.
+enum class WorkspacePanelMargins {
+    Default,
+    Standard,
+    Flush,
+};
+
+enum class WorkspaceLayoutProfile {
+    Standard,
+    FirmwareTask,
+    CompactTask,
+    Diagnostics,
+    CalibrationTask,
+};
+
+struct WorkspacePanelPresentation {
+    QWidget *content = nullptr;
+    QString title;
+    QObject *clearTarget = nullptr;
+    QByteArray clearMethod;
+};
+
+// Optional shell presentation is carried separately from
+// WorkspacePanelPresentation so the ABI2 by-value context layout remains
+// unchanged for already-built components.
+struct WorkspacePanelOptions {
+    WorkspacePanelMargins margins = WorkspacePanelMargins::Default;
+    QWidget *headerControl = nullptr;
+};
+
+struct WorkspaceUiPresentationOptions {
+    WorkspacePanelOptions contextPanel;
+    WorkspacePanelOptions inspectorPanel;
+    WorkspacePanelOptions outputPanel;
+};
+
+struct WorkspaceLibraryItem {
+    QString id;
+    QString title;
+    QString iconSource;
+};
+
+// The activation method must be invokable as bool method(const QString &id).
+// It runs on the component-owned target; the host never searches component
+// children or calls WorkspaceCanvas private implementation details.
+struct WorkspaceLibraryPresentation {
+    QList<WorkspaceLibraryItem> items;
+    QObject *activationTarget = nullptr;
+    QByteArray activationMethod;
+};
+
+struct WorkspaceUiContext {
+    QString id;
+    WorkspaceLayoutProfile layoutProfile = WorkspaceLayoutProfile::Standard;
+    WorkspacePanelPresentation contextPanel;
+    WorkspacePanelPresentation inspectorPanel;
+    WorkspacePanelPresentation outputPanel;
+    WorkspaceLibraryPresentation componentLibrary;
+};
+
+class SEREIN_SCOPE_CORE_EXPORT WorkspaceUiProvider final : public QObject {
+    Q_OBJECT
+
+public:
+    explicit WorkspaceUiProvider(QObject *parent = nullptr);
+
+    [[nodiscard]] const WorkspaceUiContext &context() const noexcept;
+    [[nodiscard]] WorkspaceUiPresentationOptions presentationOptions() const noexcept;
+    void prepareContextChange();
+    void setContext(WorkspaceUiContext context);
+    void setContext(WorkspaceUiContext context,
+                    WorkspaceUiPresentationOptions presentationOptions);
+
+signals:
+    void presentationAboutToChange();
+    void presentationChanged();
+
+private:
+    WorkspaceUiContext m_context;
+};
+
+class SEREIN_SCOPE_CORE_EXPORT IWorkspaceUiProvider {
+public:
+    virtual ~IWorkspaceUiProvider();
+    [[nodiscard]] virtual WorkspaceUiProvider *workspaceUiProvider() = 0;
+};
+
 class SEREIN_SCOPE_CORE_EXPORT IDevicePlugin {
 public:
     virtual ~IDevicePlugin();
@@ -54,3 +164,7 @@ Q_DECLARE_INTERFACE(serein::scope::IDevicePlugin,
                     "com.serein.scope.IDevicePlugin/2.0")
 Q_DECLARE_INTERFACE(serein::scope::IDeviceWorkspace,
                     "com.serein.scope.IDeviceWorkspace/1.0")
+Q_DECLARE_INTERFACE(serein::scope::IWorkspaceUiProvider,
+                    "com.serein.scope.IWorkspaceUiProvider/1.0")
+Q_DECLARE_INTERFACE(serein::scope::IWorkspaceComponentProvider,
+                    "com.serein.scope.IWorkspaceComponentProvider/1.0")

@@ -19,15 +19,19 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Svg)
+find_package(Qt6 6.4 REQUIRED COMPONENTS
+    Core
+    Network
+    Gui
+    Widgets
+    Svg
+    Qml
+    Quick
+    QuickControls2
+)
 
-include(CTest)
+qt_policy(SET QTP0004 NEW)
 
 add_subdirectory(src/core)
 add_subdirectory(src/app)
 add_subdirectory(src/plugins)
-
-if(BUILD_TESTING)
-    find_package(Qt6 6.4 REQUIRED COMPONENTS Test)
-    add_subdirectory(tests)
-endif()

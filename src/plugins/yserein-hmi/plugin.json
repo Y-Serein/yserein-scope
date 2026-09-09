@@ -1,0 +1,10 @@
+{
+  "id": "yserein-hmi",
+  "name": "Y-Serein HMI",
+  "description": "面向自有串口屏的离线页面设计器：工程、页面、数值控件、属性与预览；运行时与下载尚未接入。",
+  "version": "0.1.0",
+  "category": "设备插件",
+  "accent": "#2f6feb",
+  "capabilities": ["离线 HMI 设计器", "数值显示控件（可用）", "D133CBS / D211DBV / ESP32-P4（规划中）"],
+  "interfaceVersion": 2
+}

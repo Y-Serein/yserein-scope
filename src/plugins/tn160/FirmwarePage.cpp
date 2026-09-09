@@ -5,6 +5,7 @@
 #include <QtCore/QDir>
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
+#include <QtCore/QPointer>
 #include <QtCore/QStorageInfo>
 #include <QtCore/QThread>
 #include <QtCore/QTime>
@@ -17,20 +18,35 @@
 #include <QtWidgets/QStyle>
 #include <QtWidgets/QVBoxLayout>
 
+#include <memory>
+
 namespace serein::scope::tn160 {
 
 FirmwarePage::FirmwarePage(IHostServices *host, QWidget *parent)
     : QWidget(parent), m_host(host)
 {
-    // The host's right context panel owns the visible actions. This hidden
-    // state owner keeps UF2 selection and the monitoring timer inside the
-    // firmware page, so the panel cannot bypass its safety checks.
-    auto *transportState = new QWidget(this);
-    transportState->setObjectName(QStringLiteral("tn160FirmwareTransportState"));
-    transportState->hide();
-    auto *choose = new QPushButton(tr("选择 UF2"), transportState);
-    m_monitor = new QPushButton(tr("开始监听"), transportState);
+    m_contextPanel = new QWidget(this);
+    m_contextPanel->setObjectName(QStringLiteral("workspaceContextContent"));
+    auto *contextLayout = new QVBoxLayout(m_contextPanel);
+    contextLayout->setContentsMargins(0, 0, 0, 0);
+    contextLayout->setSpacing(8);
+    auto *hint = new QLabel(tr("安全批量 UF2 烧录"), m_contextPanel);
+    hint->setObjectName(QStringLiteral("pageSubtitle"));
+    hint->setWordWrap(true);
+    contextLayout->addWidget(hint);
+    auto *choose = new QPushButton(tr("1. 选择 UF2"), m_contextPanel);
+    m_monitor = new QPushButton(tr("2. 开始监听设备"), m_contextPanel);
     m_monitor->setProperty("kind", QStringLiteral("primary"));
+    m_contextPath = new QLabel(tr("未选择固件"), m_contextPanel);
+    m_contextPath->setObjectName(QStringLiteral("pageSubtitle"));
+    m_contextPath->setWordWrap(true);
+    m_contextStatus = new QLabel(tr("等待选择 UF2"), m_contextPanel);
+    m_contextStatus->setObjectName(QStringLiteral("statusPill"));
+    contextLayout->addWidget(choose);
+    contextLayout->addWidget(m_contextPath);
+    contextLayout->addWidget(m_monitor);
+    contextLayout->addWidget(m_contextStatus);
+    contextLayout->addStretch();
 
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(4, 4, 4, 4);
@@ -65,6 +81,7 @@ FirmwarePage::FirmwarePage(IHostServices *host, QWidget *parent)
 void FirmwarePage::shutdown()
 {
     setMonitoring(false);
+    m_ioTasks.closeAndWait();
 }
 
 QString FirmwarePage::firmwarePath() const
@@ -82,6 +99,11 @@ bool FirmwarePage::monitoring() const
     return m_timer.isActive();
 }
 
+QWidget *FirmwarePage::contextPanel() const noexcept
+{
+    return m_contextPanel;
+}
+
 void FirmwarePage::chooseFirmware()
 {
     const QString path = QFileDialog::getOpenFileName(
@@ -91,6 +113,7 @@ void FirmwarePage::chooseFirmware()
     }
     m_firmwarePath = path;
     m_status->setText(tr("固件已就绪"));
+    m_contextPath->setText(QDir::toNativeSeparators(path));
     appendLog(tr("选择固件：%1（%2 bytes）")
                   .arg(QDir::toNativeSeparators(path))
                   .arg(QFileInfo(path).size()));
@@ -135,6 +158,13 @@ void FirmwarePage::setMonitoring(const bool active)
     }
     m_monitor->style()->unpolish(m_monitor);
     m_monitor->style()->polish(m_monitor);
+    if (m_contextStatus) {
+        m_contextStatus->setText(m_status->text());
+        m_contextStatus->setProperty("state", active ? QStringLiteral("connecting")
+                                                      : QStringLiteral("ready"));
+        m_contextStatus->style()->unpolish(m_contextStatus);
+        m_contextStatus->style()->polish(m_contextStatus);
+    }
     emit firmwareStateChanged(m_firmwarePath, m_status->text(), active);
 }
 
@@ -162,54 +192,93 @@ void FirmwarePage::scanVolumes()
     }
 }
 
-bool FirmwarePage::flashVolume(const QString &rootPath)
+void FirmwarePage::flashVolume(const QString &rootPath)
 {
-    QFile source(m_firmwarePath);
-    if (!source.open(QIODevice::ReadOnly)) {
-        appendLog(tr("错误：无法读取固件：%1").arg(source.errorString()));
-        return false;
+    struct FlashResult {
+        QStringList messages;
+        bool succeeded = false;
+    };
+
+    const QString firmwarePath = m_firmwarePath;
+    const QString volumeKey = QDir::cleanPath(rootPath).toCaseFolded();
+    auto result = std::make_shared<FlashResult>();
+    QPointer<FirmwarePage> page(this);
+    const bool accepted = m_ioTasks.run(
+        [page, firmwarePath, rootPath, volumeKey, result] {
+            QFile source(firmwarePath);
+            if (!source.open(QIODevice::ReadOnly)) {
+                result->messages.append(
+                    FirmwarePage::tr("错误：无法读取固件：%1").arg(source.errorString()));
+            } else {
+                const QByteArray firmware = source.readAll();
+                const QString destinationPath = QDir(rootPath).filePath(
+                    QStringLiteral("flash.uf2"));
+                for (int attempt = 1; attempt <= 3 && !result->succeeded; ++attempt) {
+                    QFile destination(destinationPath);
+                    if (!destination.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                        result->messages.append(
+                            FirmwarePage::tr("尝试 %1/3 写入失败：%2")
+                                .arg(attempt).arg(destination.errorString()));
+                        QThread::msleep(500);
+                        continue;
+                    }
+                    const qint64 written = destination.write(firmware);
+                    destination.flush();
+                    destination.close();
+                    if (written != firmware.size()) {
+                        result->messages.append(
+                            FirmwarePage::tr("尝试 %1/3 写入不完整：%2 / %3 bytes")
+                                .arg(attempt).arg(written).arg(firmware.size()));
+                        QThread::msleep(500);
+                        continue;
+                    }
+                    QThread::msleep(100);
+                    if (!QFileInfo::exists(destinationPath)) {
+                        result->messages.append(
+                            FirmwarePage::tr("写入完成后设备已复位，盘符消失 · 视为成功"));
+                        result->succeeded = true;
+                        break;
+                    }
+                    const qint64 finalSize = QFileInfo(destinationPath).size();
+                    if (finalSize == firmware.size()) {
+                        result->succeeded = true;
+                    } else {
+                        result->messages.append(
+                            FirmwarePage::tr("尝试 %1/3 大小校验失败：%2 / %3 bytes")
+                                .arg(attempt).arg(finalSize).arg(firmware.size()));
+                        QThread::msleep(500);
+                    }
+                }
+            }
+
+            if (!page) return;
+            QMetaObject::invokeMethod(page, [page, rootPath, volumeKey, result] {
+                if (!page) return;
+                for (const QString &message : result->messages) page->appendLog(message);
+                if (!result->succeeded) {
+                    page->m_attemptedVolumes.remove(volumeKey);
+                    page->appendLog(FirmwarePage::tr("错误：烧录失败，可重新连接设备后重试"));
+                    return;
+                }
+                page->appendLog(FirmwarePage::tr("烧录完成并通过大小校验：%1")
+                                    .arg(QDir::toNativeSeparators(rootPath)));
+                page->m_status->setText(FirmwarePage::tr("上一台设备烧录成功 · 继续监听"));
+                if (page->m_contextStatus) {
+                    page->m_contextStatus->setText(page->m_status->text());
+                }
+                emit page->firmwareStateChanged(page->m_firmwarePath,
+                                                page->m_status->text(),
+                                                page->monitoring());
+                if (page->m_host) {
+                    page->m_host->setStatus(FirmwarePage::tr("TN160 · UF2 烧录成功"));
+                }
+            }, Qt::QueuedConnection);
+        });
+
+    if (!accepted) {
+        m_attemptedVolumes.remove(volumeKey);
+        appendLog(tr("错误：后台 I/O 队列已满，本次烧录未启动"));
     }
-    const QByteArray firmware = source.readAll();
-    const QString destinationPath = QDir(rootPath).filePath(QStringLiteral("flash.uf2"));
-    bool succeeded = false;
-    for (int attempt = 1; attempt <= 3 && !succeeded; ++attempt) {
-        QFile destination(destinationPath);
-        if (!destination.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            appendLog(tr("尝试 %1/3 写入失败：%2").arg(attempt).arg(destination.errorString()));
-            QThread::msleep(500);
-            continue;
-        }
-        const qint64 written = destination.write(firmware);
-        destination.flush();
-        destination.close();
-        if (written != firmware.size()) {
-            appendLog(tr("尝试 %1/3 写入不完整：%2 / %3 bytes")
-                          .arg(attempt).arg(written).arg(firmware.size()));
-            QThread::msleep(500);
-            continue;
-        }
-        QThread::msleep(100);
-        if (!QFileInfo::exists(destinationPath)) {
-            appendLog(tr("写入完成后设备已复位，盘符消失 · 视为成功"));
-            succeeded = true;
-            break;
-        }
-        const qint64 finalSize = QFileInfo(destinationPath).size();
-        if (finalSize == firmware.size()) {
-            succeeded = true;
-        } else {
-            appendLog(tr("尝试 %1/3 大小校验失败：%2 / %3 bytes")
-                          .arg(attempt).arg(finalSize).arg(firmware.size()));
-            QThread::msleep(500);
-        }
-    }
-    if (!succeeded) return false;
-    appendLog(tr("烧录完成并通过大小校验：%1").arg(QDir::toNativeSeparators(rootPath)));
-    m_status->setText(tr("上一台设备烧录成功 · 继续监听"));
-    if (m_host) {
-        m_host->setStatus(tr("TN160 · UF2 烧录成功"));
-    }
-    return true;
 }
 
 void FirmwarePage::appendLog(const QString &message)
