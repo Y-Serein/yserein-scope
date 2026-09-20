@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ControlModel.h"
+
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
@@ -11,19 +13,31 @@
 
 namespace serein::scope::yserein_hmi {
 
+class Change;
+struct ControlAdds;
+struct ControlRemoves;
+struct ControlUpdates;
+struct ControlMoves;
+struct PageAdds;
+struct PageRemoves;
+struct PageRenames;
+
 // Offline, protocol-neutral representation of one HMI project.  Runtime
 // pointers, serial sessions, sampled values and target-generated addresses do
-// not belong to this type.  The controls array is intentionally opaque JSON:
-// component definitions own their state schema and may add fields without
-// requiring a project-model migration.
+// not belong to this type.  Controls are typed (ControlModel) and their
+// authorable attributes are described by the ControlSchema registry, so field
+// rules, defaults and Inspector metadata all derive from a single table.
 class HmiProjectModel final {
 public:
-    static constexpr int CurrentSchemaVersion = 1;
+    // Version 2 introduced typed controls (ControlModel) plus a migration chain.
+    // Version 1 stored controls as opaque JSON objects.
+    static constexpr int CurrentSchemaVersion = 2;
+    static constexpr int MinimumSupportedSchemaVersion = 1;
 
     struct Page {
         QString pageId;
         QString name;
-        QJsonArray controls;
+        QList<ControlModel> controls;
 
         // Unknown page fields are retained to make a load/save round trip
         // lossless when a newer component adds page metadata.
@@ -35,6 +49,21 @@ public:
                                                   QString *error = nullptr);
     };
 
+    // One registered project resource.  The model deliberately stores only the
+    // stable identity, its semantic kind and the authoring-time source; it does
+    // not hold target Flash offsets, color depth or generated symbols.
+    struct Asset {
+        QString assetId;
+        QString kind;
+        QString source;
+        QJsonObject extra;
+
+        [[nodiscard]] QJsonObject toJsonObject() const;
+        [[nodiscard]] bool validate(QString *error = nullptr) const;
+        static std::optional<Asset> fromJsonObject(const QJsonObject &object,
+                                                   QString *error = nullptr);
+    };
+
     HmiProjectModel() = default;
 
     // Creates a usable, empty project with one editable page.  The target
@@ -43,6 +72,18 @@ public:
     static HmiProjectModel createDefault(
         const QString &targetProfile = QStringLiteral("generic"),
         const QString &projectId = {});
+
+    // Replaces this model only when parsing and validation both succeed.
+    static std::optional<HmiProjectModel> fromJsonObject(
+        const QJsonObject &object, QString *error = nullptr);
+
+    // Migration pipeline: takes a document JSON object at any supported schema
+    // version and returns current-version JSON. Pure and side-effect free so it
+    // can be exercised directly from smoke tests without touching the disk.
+    // Returns nullopt when the document is malformed or an unhandled version is
+    // encountered.
+    static std::optional<QJsonObject> migrateToCurrentVersion(
+        const QJsonObject &document, QString *error = nullptr);
 
     [[nodiscard]] int schemaVersion() const noexcept { return m_schemaVersion; }
     void setSchemaVersion(int value) noexcept { m_schemaVersion = value; }
@@ -62,6 +103,15 @@ public:
     void clearPages() { m_pages.clear(); }
     void addPage(Page page) { m_pages.append(std::move(page)); }
 
+    [[nodiscard]] QList<Asset> &assets() noexcept { return m_assets; }
+    [[nodiscard]] const QList<Asset> &assets() const noexcept { return m_assets; }
+    void setAssets(QList<Asset> value) { m_assets = std::move(value); }
+    void clearAssets() { m_assets.clear(); }
+    void addAsset(Asset asset) { m_assets.append(std::move(asset)); }
+    bool removeAsset(const QString &assetId);
+    [[nodiscard]] bool hasAsset(const QString &assetId) const;
+    [[nodiscard]] const Asset *findAsset(const QString &assetId) const;
+
     // Extension fields are intentionally opaque.  They allow a workspace to
     // retain document-level UI state (for example an active page) without
     // making that state part of the cross-target project schema.
@@ -71,22 +121,39 @@ public:
     [[nodiscard]] QJsonObject toJsonObject() const;
     [[nodiscard]] QJsonDocument toJsonDocument() const;
 
-    // Replaces this model only when parsing and validation both succeed.
     bool setJsonObject(const QJsonObject &object, QString *error = nullptr);
-    bool setJsonDocument(const QJsonDocument &document,
-                         QString *error = nullptr);
+    bool setJsonDocument(const QJsonDocument &document, QString *error = nullptr);
 
     [[nodiscard]] bool validate(QString *error = nullptr) const;
 
+    // Read-only access by stable identity. Authoring edits must go through
+    // applyChange so every mutation is recorded and reversible.
+    [[nodiscard]] const Page *findPage(const QString &pageId) const;
+    [[nodiscard]] const ControlModel *findControl(const QString &pageId,
+                                                  const QString &instanceId) const;
+
+    // Atomic, validated write entry for authoring edits. Every operation in
+    // `change` is applied to a staged copy and committed only when the result
+    // validates; on failure the model is untouched and *error names the reason.
+    bool applyChange(const Change &change, QString *error = nullptr);
+
 private:
+    Page *findPageMut(const QString &pageId);
+    ControlModel *findControlMut(const QString &pageId, const QString &instanceId);
+    bool applyOne(const ControlAdds &op, QString *error);
+    bool applyOne(const ControlRemoves &op, QString *error);
+    bool applyOne(const ControlUpdates &op, QString *error);
+    bool applyOne(const ControlMoves &op, QString *error);
+    bool applyOne(const PageAdds &op, QString *error);
+    bool applyOne(const PageRemoves &op, QString *error);
+    bool applyOne(const PageRenames &op, QString *error);
+
     int m_schemaVersion = CurrentSchemaVersion;
     QString m_projectId;
     QString m_targetProfile;
     QList<Page> m_pages;
+    QList<Asset> m_assets;
     QJsonObject m_extra;
-
-    static std::optional<HmiProjectModel> fromJsonObject(
-        const QJsonObject &object, QString *error = nullptr);
 };
 
 // File/document facade kept separate from the model so DesignerCanvas and
@@ -116,20 +183,13 @@ public:
     }
 
     bool setJsonObject(const QJsonObject &object, QString *error = nullptr);
-    bool setJsonDocument(const QJsonDocument &document,
-                         QString *error = nullptr);
+    bool setJsonDocument(const QJsonDocument &document, QString *error = nullptr);
     [[nodiscard]] bool validate(QString *error = nullptr) const
     {
         return m_model.validate(error);
     }
 
-    // Loads and validates a JSON document.  The previous model and path are
-    // retained if the operation fails.
     bool loadFromFile(const QString &filePath, QString *error = nullptr);
-
-    // Writes through QSaveFile (temporary file + atomic commit).  The model is
-    // validated before opening the destination.  The overload without a path
-    // uses the path remembered by the last successful load/save.
     bool saveToFileAtomic(const QString &filePath, QString *error = nullptr);
     bool saveToFileAtomic(QString *error = nullptr);
 

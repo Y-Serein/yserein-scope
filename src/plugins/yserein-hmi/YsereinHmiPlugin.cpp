@@ -9,11 +9,12 @@ PluginMetadata YsereinHmiPlugin::metadata() const
     return {
         .id = QStringLiteral("yserein-hmi"),
         .name = QStringLiteral("Y-Serein HMI"),
-        .description = tr("面向自有串口屏的离线页面设计器：工程、页面、数值控件、属性与预览；运行时与下载尚未接入。"),
+        .description = tr("面向自有串口屏的离线页面设计器：工程、页面、九类控件、数据绑定、事件与预览；本机目标包和 Runtime 模拟已接入，真实串口与硬件下载需目标后端。"),
         .version = QStringLiteral("0.1.0"),
         .category = tr("设备插件"),
         .accent = QStringLiteral("#2f6feb"),
-        .capabilities = {tr("离线 HMI 设计器"), tr("数值显示控件（可用）"),
+        .capabilities = {tr("离线 HMI 设计器"), tr("文本/数值/按钮/进度/状态灯/开关控件"),
+                         tr("页面绑定与跳转预览"),
                          tr("D133CBS / D211DBV / ESP32-P4（规划中）")},
         .interfaceVersion = PluginInterfaceVersion,
     };

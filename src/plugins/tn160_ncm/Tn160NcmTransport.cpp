@@ -23,6 +23,7 @@ constexpr int RawWordsPerRow = FrameWidth + 2;
 constexpr int RawFrameBytes = 2 + FrameHeight * RawWordsPerRow * 2 + 2;
 constexpr int CalibrationPacketBytes = 64 + Temp8PayloadBytes * 2
                                      + Temp8PayloadBytes * 4 + 10;
+constexpr int ThermalModelPacketBytes = 64;
 constexpr quint8 Temp8PixelFormat = 5;
 constexpr quint8 Adc16PixelFormat = 1;
 constexpr quint32 MetaImageValid = 1u << 0;
@@ -225,6 +226,10 @@ void Tn160NcmTransport::close()
     m_http.cancel(std::exchange(m_reply, 0));
     m_http.cancel(std::exchange(m_diagnosticsReply, 0));
     m_http.cancel(std::exchange(m_uploadReply, 0));
+    m_http.cancel(std::exchange(m_thermalModelUploadReply, 0));
+    m_http.cancel(std::exchange(m_thermalModelClearReply, 0));
+    m_http.cancel(std::exchange(m_thermalModelReadReply, 0));
+    m_http.cancel(std::exchange(m_thermalModelStateReply, 0));
     m_http.cancel(std::exchange(m_networkReply, 0));
     m_http.cancel(std::exchange(m_continuousAdcReply, 0));
     m_requestPending = false;
@@ -307,6 +312,10 @@ void Tn160NcmTransport::terminateActiveConnection(const QString &message)
     m_http.cancel(std::exchange(m_reply, 0));
     m_http.cancel(std::exchange(m_diagnosticsReply, 0));
     m_http.cancel(std::exchange(m_uploadReply, 0));
+    m_http.cancel(std::exchange(m_thermalModelUploadReply, 0));
+    m_http.cancel(std::exchange(m_thermalModelClearReply, 0));
+    m_http.cancel(std::exchange(m_thermalModelReadReply, 0));
+    m_http.cancel(std::exchange(m_thermalModelStateReply, 0));
     m_http.cancel(std::exchange(m_networkReply, 0));
     m_http.cancel(std::exchange(m_continuousAdcReply, 0));
     m_requestPending = false;
@@ -630,6 +639,78 @@ void Tn160NcmTransport::uploadCalibration(
         packet, headers);
 }
 
+void Tn160NcmTransport::uploadThermalModel(const QByteArray &packet)
+{
+    if (!m_active) {
+        emit thermalModelUploadFinished(false, {}, tr("NCM 未连接"));
+        return;
+    }
+    if (m_uploadInProgress || m_thermalModelUploadReply
+        || packet.size() != ThermalModelPacketBytes) {
+        emit thermalModelUploadFinished(
+            false, {}, packet.size() != ThermalModelPacketBytes
+                ? tr("热模型长度异常：%1 / %2 bytes")
+                      .arg(packet.size()).arg(ThermalModelPacketBytes)
+                : tr("已有热模型上传正在进行"));
+        return;
+    }
+    m_uploadInProgress = true;
+    m_pollTimer.stop();
+    m_activeFrameRequestTimer.stop();
+    m_continuousAdcTimer.stop();
+    m_http.cancel(std::exchange(m_reply, 0));
+    m_http.cancel(std::exchange(m_diagnosticsReply, 0));
+    m_http.cancel(std::exchange(m_continuousAdcReply, 0));
+    m_requestPending = false;
+    m_thermalModelUploadReply = m_http.post(
+        url(QStringLiteral("/api/v1/calibration/v1/thermal-model")),
+        packet,
+        {{"Content-Type", "application/vnd.sipeed.tn160-thermal-drift-model-v2"},
+         {"X-Sipeed-Request", "1"},
+         {"X-Sipeed-Thermal-Model-Confirm", "write-v2"}});
+}
+
+void Tn160NcmTransport::clearThermalModel()
+{
+    if (!m_active) {
+        emit thermalModelClearFinished(false, {}, tr("NCM 未连接"));
+        return;
+    }
+    if (m_uploadInProgress || m_thermalModelUploadReply
+        || m_thermalModelClearReply) {
+        emit thermalModelClearFinished(false, {}, tr("已有热模型事务正在进行"));
+        return;
+    }
+    m_uploadInProgress = true;
+    m_pollTimer.stop();
+    m_activeFrameRequestTimer.stop();
+    m_continuousAdcTimer.stop();
+    m_http.cancel(std::exchange(m_reply, 0));
+    m_http.cancel(std::exchange(m_diagnosticsReply, 0));
+    m_http.cancel(std::exchange(m_continuousAdcReply, 0));
+    m_requestPending = false;
+    m_thermalModelClearReply = m_http.post(
+        url(QStringLiteral("/api/v1/calibration/v1/thermal-model/clear")),
+        QByteArray{},
+        {{"Content-Type", "application/vnd.sipeed.tn160-thermal-drift-model-v2"},
+         {"X-Sipeed-Request", "1"},
+         {"X-Sipeed-Thermal-Model-Confirm", "clear-v2"}});
+}
+
+void Tn160NcmTransport::requestThermalModel()
+{
+    if (!m_active || m_thermalModelReadReply) return;
+    m_thermalModelReadReply = m_http.get(
+        url(QStringLiteral("/api/v1/calibration/v1/thermal-model")));
+}
+
+void Tn160NcmTransport::requestThermalModelState()
+{
+    if (!m_active || m_thermalModelStateReply) return;
+    m_thermalModelStateReply = m_http.get(
+        url(QStringLiteral("/api/v1/calibration/v1/thermal-model/state")));
+}
+
 void Tn160NcmTransport::setNetworkSegment(const int segment)
 {
     if (!m_active) {
@@ -797,6 +878,85 @@ void Tn160NcmTransport::handleHttpCompleted(
     if (requestId == m_diagnosticsReply) {
         m_diagnosticsReply = 0;
         if (error.isEmpty()) m_lastDiagnostics = jsonMap(body);
+        return;
+    }
+
+    if (requestId == m_thermalModelReadReply) {
+        m_thermalModelReadReply = 0;
+        const bool success = error.isEmpty() && statusCode == 200
+                             && body.size() == ThermalModelPacketBytes;
+        emit thermalModelReadbackFinished(
+            success, success ? body : QByteArray{},
+            success ? QString{}
+                    : (!error.isEmpty() ? error
+                                        : tr("热模型回读失败：HTTP %1")
+                                              .arg(statusCode)));
+        return;
+    }
+
+    if (requestId == m_thermalModelStateReply) {
+        m_thermalModelStateReply = 0;
+        const QVariantMap state = jsonMap(body);
+        const bool success = error.isEmpty() && statusCode == 200
+                             && !state.isEmpty();
+        emit thermalModelStateReady(
+            success, success ? state : QVariantMap{},
+            success ? QString{}
+                    : (!error.isEmpty() ? error
+                                        : tr("热模型状态读取失败：HTTP %1")
+                                              .arg(statusCode)));
+        return;
+    }
+
+    if (requestId == m_thermalModelUploadReply) {
+        m_thermalModelUploadReply = 0;
+        const QVariantMap result = jsonMap(body);
+        const bool success = error.isEmpty() && statusCode == 200
+                             && result.value(QStringLiteral("accepted"))
+                                    .toBool();
+        const QString responseError =
+            result.value(QStringLiteral("error")).toString();
+        m_uploadInProgress = false;
+        emit thermalModelUploadFinished(
+            success, result,
+            success ? QString{}
+                    : (!responseError.isEmpty()
+                           ? responseError
+                           : (!error.isEmpty()
+                                  ? error
+                                  : tr("设备拒绝热模型：HTTP %1")
+                                        .arg(statusCode))));
+        if (m_active) {
+            m_pollTimer.start(0);
+            if (m_continuousAdcEnabled && m_mode == Mode::Monitor) {
+                m_continuousAdcTimer.start(m_continuousAdcIntervalMs);
+            }
+        }
+        return;
+    }
+
+    if (requestId == m_thermalModelClearReply) {
+        m_thermalModelClearReply = 0;
+        const QVariantMap result = jsonMap(body);
+        const bool success = error.isEmpty() && statusCode == 200
+                             && result.value(QStringLiteral("accepted"))
+                                    .toBool()
+                             && result.value(QStringLiteral("state"))
+                                    .toString()
+                                    == QStringLiteral("cleared");
+        const QString responseError =
+            result.value(QStringLiteral("error")).toString();
+        m_uploadInProgress = false;
+        emit thermalModelClearFinished(
+            success, result,
+            success ? QString{}
+                    : (!responseError.isEmpty()
+                           ? responseError
+                           : (!error.isEmpty()
+                                  ? error
+                                  : tr("设备拒绝清除热模型：HTTP %1")
+                                        .arg(statusCode))));
+        if (m_active) m_pollTimer.start(0);
         return;
     }
 

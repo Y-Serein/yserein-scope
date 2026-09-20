@@ -2,6 +2,7 @@
 
 #include <serein/scope/PluginInterface.h>
 #include <serein/scope/SerialDataSession.h>
+#include <serein/scope/ChannelRegistry.h>
 #include <serein/scope/WorkspaceComponents.h>
 
 #include <QtCore/QElapsedTimer>
@@ -33,11 +34,13 @@ class WaveformWidget;
 
 class SerialScopeWorkspace final : public QWidget, public IDeviceWorkspace,
                                    public IWorkspaceUiProvider,
-                                   public IWorkspaceComponentProvider {
+                                   public IWorkspaceComponentProvider,
+                                   public IWorkspaceComponentStateAdapter {
     Q_OBJECT
     Q_INTERFACES(serein::scope::IDeviceWorkspace
                  serein::scope::IWorkspaceUiProvider
-                 serein::scope::IWorkspaceComponentProvider)
+                 serein::scope::IWorkspaceComponentProvider
+                 serein::scope::IWorkspaceComponentStateAdapter)
     Q_PROPERTY(quint64 uiFlushCount READ uiFlushCount)
     Q_PROPERTY(quint64 coalescedUiSamples READ coalescedUiSamples)
     Q_PROPERTY(quint64 coalescedTerminalLines READ coalescedTerminalLines)
@@ -51,6 +54,9 @@ public:
     componentDefinitions() const override;
     QWidget *createComponent(const QString &definitionId,
                               QWidget *parent) override;
+    bool applyComponentState(
+        QWidget *component, const WorkspaceComponentInstance &instance,
+        QString *error = nullptr) override;
 
 public slots:
     void refreshPorts();
@@ -63,6 +69,7 @@ public slots:
     [[nodiscard]] quint64 uiFlushCount() const noexcept;
     [[nodiscard]] quint64 coalescedUiSamples() const noexcept;
     [[nodiscard]] quint64 coalescedTerminalLines() const noexcept;
+    [[nodiscard]] ChannelRegistry *channelRegistry() noexcept;
     void sendCommandText(const QString &command, const QString &ending);
     void clearData();
     bool activateLibraryComponent(const QString &componentId);
@@ -89,6 +96,9 @@ private:
     };
 
     void rebuildDecoder();
+    QWidget *createWaveformComponent(QWidget *parent);
+    QWidget *createChannelsComponent(QWidget *parent);
+    QWidget *createTerminalComponent(QWidget *parent);
     void updateRate(qsizetype pendingBytes);
     void syncChannels(const SamplePacket &sample);
     void appendPacket(const Packet &packet);
@@ -99,6 +109,7 @@ private:
     WorkspaceUiProvider *m_uiProvider = nullptr;
     QWidget *m_contextPanel = nullptr;
     SerialDataSession m_session;
+    ChannelRegistry m_channelRegistry;
     QElapsedTimer m_rateTimer;
     qint64 m_totalBytes = 0;
     QComboBox *m_port = nullptr;

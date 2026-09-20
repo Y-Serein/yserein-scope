@@ -304,10 +304,7 @@ Tn160Workspace::Tn160Workspace(IHostServices *host, QWidget *parent)
     uiContext.contextPanel = {m_contextPanel, tr("固件标定"), nullptr, {}};
     uiContext.inspectorPanel = {m_inspectorPanel, tr("数据与属性"), nullptr, {}};
     uiContext.outputPanel = {m_outputPanel, tr("诊断输出"), nullptr, {}};
-    uiContext.componentLibrary.items = {
-        {QStringLiteral("thermal"), tr("TN160 热图"),
-         QStringLiteral(":/serein/thermal.svg")},
-    };
+    uiContext.componentLibrary.items = {};
     WorkspaceUiPresentationOptions presentationOptions;
     presentationOptions.contextPanel.margins = WorkspacePanelMargins::Flush;
     presentationOptions.inspectorPanel.margins = WorkspacePanelMargins::Flush;
@@ -324,15 +321,18 @@ Tn160Workspace::Tn160Workspace(IHostServices *host, QWidget *parent)
 
 QWidget *Tn160Workspace::createLiveSurface()
 {
-    auto *surface = new ComponentSurface(tr("TN160 实时热图"), this);
-    auto *contentLayout = new QVBoxLayout(surface->contentHost());
-    contentLayout->setContentsMargins(0, 0, 0, 0);
-    m_thermal = new ThermalView(surface->contentHost());
+    m_liveCanvas = new WorkspaceCanvas(QStringLiteral("tn160-ncm/live-workbench-v1"), this);
+    m_liveCanvas->setProperty("emptyTitle", tr("TN160 实时诊断"));
+    m_liveCanvas->setProperty("emptyHint", tr("从组件库添加热图、关键测量或实时趋势"));
+    m_thermal = new ThermalView;
     m_thermal->setObjectName(QStringLiteral("tn160ThermalView"));
     m_thermal->setCrosshairVisible(true);
     m_thermal->setExtremaVisible(true);
-    contentLayout->addWidget(m_thermal, 1);
-    return surface;
+    m_componentThermals.append(m_thermal);
+    m_liveCanvas->addComponent(QStringLiteral("tn160.thermal"), tr("TN160 热图"),
+                               m_thermal, QRectF(0.02, 0.02, 0.96, 0.92),
+                               QSize(380, 220));
+    return m_liveCanvas;
 }
 
 QWidget *Tn160Workspace::createUnifiedContext()
@@ -342,14 +342,14 @@ QWidget *Tn160Workspace::createUnifiedContext()
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setWidgetResizable(true);
     scroll->setMinimumWidth(0);
-    scroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 
     auto *body = new QWidget(scroll);
     body->setObjectName(QStringLiteral("tn160UnifiedContextBody"));
     body->setMinimumWidth(0);
-    body->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    body->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     auto *layout = new QVBoxLayout(body);
     layout->setContentsMargins(12, 10, 12, 12);
     layout->setSpacing(8);
@@ -383,6 +383,9 @@ QWidget *Tn160Workspace::createUnifiedContext()
         tr("192.168.17.1 或 http://地址"));
     m_endpointEdit->lineEdit()->setClearButtonEnabled(true);
     m_endpointEdit->setToolTip(tr("可输入要连接的 TN160 USB NCM 地址"));
+    m_endpointEdit->setMinimumWidth(0);
+    m_endpointEdit->setMaximumWidth(QWIDGETSIZE_MAX);
+    m_endpointEdit->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
     connection.body->addWidget(m_endpointEdit);
     auto *actions = new QHBoxLayout;
     m_scanButton = new QPushButton(tr("扫描设备"), connection.frame);
@@ -417,6 +420,7 @@ QWidget *Tn160Workspace::createUnifiedContext()
     stepLayout->setVerticalSpacing(6);
     const QStringList captions{
         tr("1、对准 0°C"), tr("2、对准 50°C"),
+        tr("3、保持 50°C"), tr("4、回到 0°C"),
     };
     for (int index = 0; index < captions.size(); ++index) {
         auto *button = m_calibration->findChild<QPushButton *>(
@@ -450,16 +454,15 @@ QWidget *Tn160Workspace::createUnifiedContext()
     SectionChrome profile = makeSection(
         body, QStringLiteral("tn160FirmwareProfileSection"),
         tr("定制固件参数"), false);
-    auto *profileHint = new QLabel(
-        tr("导入固定 50°C 冷启动 CSV，离线生成 C++ 补偿参数；"
-           "不会写入设备或改动生产标定。"),
-        profile.frame);
-    profileHint->setObjectName(QStringLiteral("pageSubtitle"));
-    profileHint->setWordWrap(true);
-    profile.body->addWidget(profileHint);
     auto *profileButton = new QPushButton(tr("生成固件补偿参数"), profile.frame);
     profileButton->setObjectName(QStringLiteral("tn160GenerateFirmwareProfile"));
     profileButton->setProperty("kind", QStringLiteral("secondary"));
+    profileButton->setToolTip(
+        tr("导入固定 50°C 冷启动 CSV，离线生成 C++ 补偿参数；"
+           "不会写入设备或改动生产标定。"));
+    profileButton->setMinimumWidth(0);
+    profileButton->setMaximumWidth(QWIDGETSIZE_MAX);
+    profileButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     profile.body->addWidget(profileButton);
     connect(profileButton, &QPushButton::clicked,
             this, &Tn160Workspace::generateFirmwareProfile);
@@ -548,7 +551,6 @@ QWidget *Tn160Workspace::createUnifiedOutput()
     m_outputTabs->setObjectName(QStringLiteral("tn160UnifiedOutputTabs"));
     m_outputTabs->setDrawBase(false);
     m_outputTabs->setExpanding(false);
-    m_outputTabs->setFixedHeight(32);
     m_outputTabs->addTab(tr("实时趋势"));
     m_outputTabs->addTab(tr("标定结果"));
     layout->addWidget(m_outputTabs);
@@ -562,6 +564,7 @@ QWidget *Tn160Workspace::createUnifiedOutput()
     // otherwise prevent the host from applying its normal dock split.
     m_trend->setMinimumHeight(0);
     m_trend->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    m_componentTrends.append(m_trend);
     connect(m_trend, &TrendWidget::exportPngRequested,
             this, &Tn160Workspace::exportTrendPng);
     connect(m_trend, &TrendWidget::exportCsvRequested,
@@ -608,18 +611,6 @@ QWidget *Tn160Workspace::createUnifiedOutput()
         preview->setMinimumSize(0, 0);
         preview->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     }
-    if (auto *quality = results->findChild<QLabel *>(
-            QStringLiteral("tn160ProductionQuality"))) {
-        QWidget *qualityBody = quality->parentWidget();
-        auto *ntcCoverage = m_calibration->findChild<QLabel *>(
-            QStringLiteral("tn160ProductionNtcStatus"));
-        if (qualityBody && qualityBody->layout() && ntcCoverage) {
-            ntcCoverage->setWordWrap(true);
-            ntcCoverage->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-            ntcCoverage->setParent(qualityBody);
-            qualityBody->layout()->addWidget(ntcCoverage);
-        }
-    }
     resultsLayout->addWidget(results, 1);
     m_outputStack->addWidget(resultsPage);
     layout->addWidget(m_outputStack, 1);
@@ -639,7 +630,9 @@ void Tn160Workspace::handleLivePackets(const PacketList &packets)
             && image->pixelFormat == QStringLiteral("gray8")
             && image->width == FrameWidth && image->height == FrameHeight
             && image->pixels.size() == FrameWidth * FrameHeight) {
-            m_thermal->setFrame(image->pixels, image->width, image->height);
+            for (const auto &thermal : std::as_const(m_componentThermals)) {
+                if (thermal) thermal->setFrame(image->pixels, image->width, image->height);
+            }
             revealLiveSurface();
         } else if (const auto *decoded = std::get_if<SamplePacket>(&packet);
                    decoded
@@ -658,7 +651,9 @@ void Tn160Workspace::handleLivePackets(const PacketList &packets)
             /* A reboot/reconnect can keep the same serial.  Do not export two
              * thermal sessions as one continuous trend. */
             m_diagnosticHistory.clear();
-            m_trend->clear();
+            for (const auto &trend : std::as_const(m_componentTrends)) {
+                if (trend) trend->clear();
+            }
             m_firstSampleTimestampUs = 0;
             m_previousSampleTimestampUs = 0;
         }
@@ -688,7 +683,9 @@ void Tn160Workspace::handleLivePackets(const PacketList &packets)
     trend.nucDg = sampleInteger(*sample, MonitorNucDg);
     trend.nucDv = sampleInteger(*sample, MonitorNucDv);
     trend.nucDn = sampleInteger(*sample, MonitorNucDn);
-    m_trend->addSample(trend);
+    for (const auto &trendView : std::as_const(m_componentTrends)) {
+        if (trendView) trendView->addSample(trend);
+    }
 
     ThermalFrameInfo info;
     info.centerPointC = trend.centerPoint;
@@ -700,7 +697,9 @@ void Tn160Workspace::handleLivePackets(const PacketList &packets)
     info.tHighC = sampleValue(*sample, MonitorTHighC);
     info.vtemp = trend.vtempRaw;
     info.fps = deltaSeconds > 0.0 ? 1.0 / deltaSeconds : 0.0;
-    m_thermal->setFrameInfo(info);
+    for (const auto &thermal : std::as_const(m_componentThermals)) {
+        if (thermal) thermal->setFrameInfo(info);
+    }
 
     m_centerMetric->setText(temperatureText(trend.centerRoi));
     m_ntcMetric->setText(temperatureText(trend.ntc));
@@ -710,6 +709,13 @@ void Tn160Workspace::handleLivePackets(const PacketList &packets)
     m_fpsMetric->setText(deltaSeconds > 0.0
         ? QStringLiteral("%1 FPS").arg(1.0 / deltaSeconds, 0, 'f', 1)
         : QStringLiteral("—"));
+    emit telemetryChanged(temperatureText(trend.centerRoi),
+                          temperatureText(trend.ntc),
+                          QString::number(std::llround(trend.centerRoiAdu)),
+                          QString::number(std::llround(trend.vtempRaw)),
+                          deltaSeconds > 0.0
+                              ? QStringLiteral("%1 FPS").arg(1.0 / deltaSeconds, 0, 'f', 1)
+                              : QStringLiteral("—"));
 }
 
 void Tn160Workspace::applyWorkflowState(const QVariantMap &state)
@@ -720,7 +726,9 @@ void Tn160Workspace::applyWorkflowState(const QVariantMap &state)
     if (!serial.trimmed().isEmpty() && serial != m_historySerial) {
         m_historySerial = serial;
         m_diagnosticHistory.clear();
-        if (m_trend) m_trend->clear();
+        for (const auto &trend : std::as_const(m_componentTrends)) {
+            if (trend) trend->clear();
+        }
         m_firstSampleTimestampUs = 0;
         m_previousSampleTimestampUs = 0;
     }
@@ -909,6 +917,96 @@ void Tn160Workspace::shutdown()
 WorkspaceUiProvider *Tn160Workspace::workspaceUiProvider()
 {
     return m_uiProvider;
+}
+
+QList<WorkspaceComponentDefinition> Tn160Workspace::componentDefinitions() const
+{
+    const auto common = WorkspaceComponentCapability::Movable
+        | WorkspaceComponentCapability::Resizable
+        | WorkspaceComponentCapability::Maximizable
+        | WorkspaceComponentCapability::Cloneable;
+    return {
+        {QStringLiteral("tn160.thermal"), QStringLiteral("tn160-ncm"),
+         tr("TN160 热图"), tr("实时诊断"), QStringLiteral(":/serein/thermal.svg"),
+         QSize(640, 420), QSize(380, 220),
+         common | WorkspaceComponentCapability::DataBinding,
+         WorkspaceBindingKind::ImageChannel, {}},
+        {QStringLiteral("tn160.measurements"), QStringLiteral("tn160-ncm"),
+         tr("关键测量"), tr("实时诊断"), QString(), QSize(280, 220), QSize(220, 160),
+         common | WorkspaceComponentCapability::DataBinding,
+         WorkspaceBindingKind::SampleChannel, {}},
+        {QStringLiteral("tn160.trend"), QStringLiteral("tn160-ncm"),
+         tr("实时趋势"), tr("实时诊断"), QString(), QSize(640, 260), QSize(320, 160),
+         common | WorkspaceComponentCapability::DataBinding,
+         WorkspaceBindingKind::SampleChannel, {}},
+    };
+}
+
+QWidget *Tn160Workspace::createComponent(const QString &definitionId,
+                                         QWidget *parent)
+{
+    const QString id = definitionId.trimmed();
+    if (id == QStringLiteral("tn160.thermal")) {
+        auto *thermal = new ThermalView(parent);
+        thermal->setObjectName(QStringLiteral("tn160NcmThermalComponent"));
+        thermal->setCrosshairVisible(true);
+        thermal->setExtremaVisible(true);
+        m_componentThermals.append(thermal);
+        return thermal;
+    }
+    if (id == QStringLiteral("tn160.trend")) {
+        auto *trend = new TrendWidget(parent);
+        trend->setObjectName(QStringLiteral("tn160NcmTrendComponent"));
+        m_componentTrends.append(trend);
+        return trend;
+    }
+    if (id == QStringLiteral("tn160.measurements")) {
+        auto *panel = new QWidget(parent);
+        auto *layout = new QVBoxLayout(panel);
+        layout->setContentsMargins(12, 12, 12, 12);
+        layout->setSpacing(6);
+        auto addMetric = [panel, layout](const QString &name, QLabel **value,
+                                         const bool primary = false) {
+            auto *row = new QFrame(panel);
+            row->setObjectName(primary ? QStringLiteral("metricPrimary")
+                                       : QStringLiteral("metricRow"));
+            auto *rowLayout = new QHBoxLayout(row);
+            rowLayout->setContentsMargins(4, 0, 4, 0);
+            auto *label = new QLabel(name, row);
+            label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+            auto *result = new QLabel(primary ? QStringLiteral("--.-- °C")
+                                              : QStringLiteral("—"), row);
+            result->setMinimumWidth(54);
+            result->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            rowLayout->addWidget(label, 1);
+            rowLayout->addWidget(result);
+            layout->addWidget(row);
+            *value = result;
+        };
+        QLabel *center = nullptr;
+        QLabel *ntc = nullptr;
+        QLabel *adu = nullptr;
+        QLabel *vtemp = nullptr;
+        QLabel *fps = nullptr;
+        addMetric(QStringLiteral("Center 5×5"), &center, true);
+        addMetric(QStringLiteral("NTC"), &ntc);
+        addMetric(QStringLiteral("Center ADU"), &adu);
+        addMetric(QStringLiteral("VTEMP ADU"), &vtemp);
+        addMetric(tr("帧率"), &fps);
+        layout->addStretch(1);
+        connect(this, &Tn160Workspace::telemetryChanged, panel,
+                [center, ntc, adu, vtemp, fps](const QString &c, const QString &n,
+                                               const QString &a, const QString &v,
+                                               const QString &f) {
+                    if (center) center->setText(c);
+                    if (ntc) ntc->setText(n);
+                    if (adu) adu->setText(a);
+                    if (vtemp) vtemp->setText(v);
+                    if (fps) fps->setText(f);
+                });
+        return panel;
+    }
+    return nullptr;
 }
 
 int Tn160Workspace::currentPageIndex() const

@@ -1,0 +1,10 @@
+{
+  "id": "yserein-swarm-sim",
+  "name": "YSerein Swarm Simulator",
+  "description": "多机编队模拟器组件，覆盖 UDP 双协议接入、舞步播放与网格编队生成。",
+  "version": "0.1.0",
+  "category": "Device component",
+  "accent": "#32c9a4",
+  "capabilities": ["双协议", "舞步", "网格编队", "地图"],
+  "interfaceVersion": 2
+}

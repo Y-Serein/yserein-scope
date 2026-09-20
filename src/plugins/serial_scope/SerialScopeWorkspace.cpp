@@ -77,78 +77,36 @@ SerialScopeWorkspace::SerialScopeWorkspace(IHostServices *host, QWidget *parent)
 
     m_uiProvider = new WorkspaceUiProvider(this);
 
-    auto *plotPanel = new QFrame;
-    plotPanel->setObjectName(QStringLiteral("panel"));
-    auto *plotLayout = new QVBoxLayout(plotPanel);
-    plotLayout->setContentsMargins(10, 10, 10, 10);
-    auto *plotHeader = new QHBoxLayout;
-    m_rate = new QLabel(QStringLiteral("0 B/s  ·  buffer 0 B"));
-    m_rate->setObjectName(QStringLiteral("pageSubtitle"));
-    auto *clear = new QPushButton(tr("清空"));
-    clear->setProperty("kind", QStringLiteral("quiet"));
-    plotHeader->addWidget(m_rate);
-    plotHeader->addStretch();
-    plotHeader->addWidget(clear);
-    plotLayout->addLayout(plotHeader);
-    m_waveform = static_cast<WaveformWidget *>(
-        createComponent(QStringLiteral("serial-scope.waveform"), nullptr));
-    plotLayout->addWidget(m_waveform, 1);
-    auto *channelPanel = new QFrame;
-    channelPanel->setObjectName(QStringLiteral("panel"));
-    channelPanel->setMinimumWidth(190);
-    channelPanel->setMaximumWidth(270);
-    auto *channelLayout = new QVBoxLayout(channelPanel);
-    channelLayout->setContentsMargins(10, 10, 10, 10);
-    auto *channelHint = new QLabel(tr("勾选决定波形可见性"));
-    channelHint->setObjectName(QStringLiteral("pageSubtitle"));
-    m_channels = new QListWidget;
-    m_channels->setObjectName(QStringLiteral("channelList"));
-    channelLayout->addWidget(channelHint);
-    channelLayout->addWidget(m_channels, 1);
-    auto *terminalPanel = new QFrame;
-    terminalPanel->setObjectName(QStringLiteral("panel"));
-    auto *terminalLayout = new QVBoxLayout(terminalPanel);
-    terminalLayout->setContentsMargins(10, 9, 10, 10);
-    m_terminal = new QPlainTextEdit;
-    m_terminal->setObjectName(QStringLiteral("serialTerminalOutput"));
-    m_terminal->setReadOnly(true);
-    m_terminal->document()->setMaximumBlockCount(1200);
-    m_terminal->setMaximumHeight(160);
-    terminalLayout->addWidget(m_terminal);
-    auto *sendRow = new QHBoxLayout;
-    m_command = new QLineEdit;
-    m_command->setObjectName(QStringLiteral("serialCommandInput"));
-    m_command->setPlaceholderText(tr("发送文本命令"));
-    m_ending = new QComboBox;
-    m_ending->addItems({QStringLiteral("LF"), QStringLiteral("CRLF"), tr("无换行")});
-    m_command->setEnabled(false);
-    m_ending->setEnabled(false);
-    auto *send = new QPushButton(tr("发送"));
-    send->setObjectName(QStringLiteral("serialSendButton"));
-    sendRow->addWidget(m_command, 1);
-    sendRow->addWidget(m_ending);
-    sendRow->addWidget(send);
-    terminalLayout->addLayout(sendRow);
+    auto *plotPanel = createComponent(QStringLiteral("serial-scope.waveform"), nullptr);
+    auto *channelPanel = createComponent(QStringLiteral("serial-scope.channels"), nullptr);
+    auto *terminalPanel = createComponent(QStringLiteral("serial-scope.terminal"), nullptr);
+    Q_ASSERT(plotPanel && channelPanel && terminalPanel);
     // Serial Scope is the host workspace itself.  Keep the canvas empty on
     // first open; waveform, channel and terminal views are optional
     // instances, not three fixed panels that compete with the host docks.
     // Definition IDs are globally stable and provider-qualified. Preserve
-    // the existing waveform layout once while moving from the historical
-    // canvas-local "waveform" ID.
+    // the existing layout once while moving from the historical canvas-local
+    // IDs (waveform/channels/terminal).
     {
         QSettings settings;
         settings.beginGroup(QStringLiteral("serial/serial-scope-v2"));
-        constexpr auto oldId = "waveform";
-        constexpr auto newId = "serial-scope.waveform";
-        for (const QString &field : {QStringLiteral("geometry"),
-                                     QStringLiteral("zOrder"),
-                                     QStringLiteral("visible")}) {
-            const QString oldKey = QStringLiteral("components/%1/%2")
-                .arg(QString::fromLatin1(oldId), field);
-            const QString newKey = QStringLiteral("components/%1/%2")
-                .arg(QString::fromLatin1(newId), field);
-            if (settings.contains(oldKey) && !settings.contains(newKey)) {
-                settings.setValue(newKey, settings.value(oldKey));
+        const QList<QPair<QString, QString>> aliases = {
+            {QStringLiteral("waveform"), QStringLiteral("serial-scope.waveform")},
+            {QStringLiteral("channels"), QStringLiteral("serial-scope.channels")},
+            {QStringLiteral("terminal"), QStringLiteral("serial-scope.terminal")},
+        };
+        for (const auto &[oldId, newId] : aliases) {
+            for (const QString &field : {QStringLiteral("geometry"),
+                                         QStringLiteral("instanceId"),
+                                         QStringLiteral("zOrder"),
+                                         QStringLiteral("visible")}) {
+                const QString oldKey = QStringLiteral("components/%1/%2")
+                    .arg(oldId, field);
+                const QString newKey = QStringLiteral("components/%1/%2")
+                    .arg(newId, field);
+                if (settings.contains(oldKey) && !settings.contains(newKey)) {
+                    settings.setValue(newKey, settings.value(oldKey));
+                }
             }
         }
         settings.endGroup();
@@ -160,14 +118,14 @@ SerialScopeWorkspace::SerialScopeWorkspace(IHostServices *host, QWidget *parent)
     m_workspace->addComponent(QStringLiteral("serial-scope.waveform"),
                               tr("实时波形"), plotPanel,
                               QRectF(0.018, 0.028, 0.690, 0.560), QSize(360, 210));
-    m_workspace->addComponent(QStringLiteral("channels"), tr("数据通道"), channelPanel,
+    m_workspace->addComponent(QStringLiteral("serial-scope.channels"), tr("数据通道"), channelPanel,
                               QRectF(0.720, 0.028, 0.262, 0.560), QSize(180, 210));
-    m_workspace->addComponent(QStringLiteral("terminal"), tr("串口终端"), terminalPanel,
+    m_workspace->addComponent(QStringLiteral("serial-scope.terminal"), tr("串口终端"), terminalPanel,
                               QRectF(0.018, 0.642, 0.964, 0.330), QSize(520, 130));
     if (!restoreComponentLayout) {
         m_workspace->setComponentVisible(QStringLiteral("serial-scope.waveform"), false);
-        m_workspace->setComponentVisible(QStringLiteral("channels"), false);
-        m_workspace->setComponentVisible(QStringLiteral("terminal"), false);
+        m_workspace->setComponentVisible(QStringLiteral("serial-scope.channels"), false);
+        m_workspace->setComponentVisible(QStringLiteral("serial-scope.terminal"), false);
     }
 
     WorkspaceUiContext uiContext;
@@ -176,9 +134,9 @@ SerialScopeWorkspace::SerialScopeWorkspace(IHostServices *host, QWidget *parent)
     uiContext.componentLibrary.items = {
         {QStringLiteral("serial-scope.waveform"), tr("实时波形"),
          QStringLiteral(":/serein/waveform.svg")},
-        {QStringLiteral("channels"), tr("数据通道"),
+        {QStringLiteral("serial-scope.channels"), tr("数据通道"),
          QStringLiteral(":/serein/channels.svg")},
-        {QStringLiteral("terminal"), tr("串口终端"),
+        {QStringLiteral("serial-scope.terminal"), tr("串口终端"),
          QStringLiteral(":/serein/terminal.svg")},
     };
     uiContext.componentLibrary.activationTarget = this;
@@ -190,11 +148,7 @@ SerialScopeWorkspace::SerialScopeWorkspace(IHostServices *host, QWidget *parent)
 
     connect(m_scan, &QPushButton::clicked, this, &SerialScopeWorkspace::refreshPorts);
     connect(m_connect, &QPushButton::clicked, this, &SerialScopeWorkspace::toggleConnection);
-    connect(clear, &QPushButton::clicked, this, &SerialScopeWorkspace::clearData);
-    connect(send, &QPushButton::clicked, this, &SerialScopeWorkspace::sendCommand);
     connect(m_command, &QLineEdit::returnPressed, this, &SerialScopeWorkspace::sendCommand);
-    connect(m_channels, &QListWidget::itemChanged,
-            this, &SerialScopeWorkspace::channelVisibilityChanged);
     connect(&m_session, &SerialDataSession::stateChanged,
             this, &SerialScopeWorkspace::handleState);
     connect(&m_session, &SerialDataSession::packetsDecoded,
@@ -207,6 +161,25 @@ SerialScopeWorkspace::SerialScopeWorkspace(IHostServices *host, QWidget *parent)
             this, &SerialScopeWorkspace::handleBytesReceived);
     connect(&m_session, &SerialDataSession::bytesWritten,
             this, &SerialScopeWorkspace::handleBytesWritten);
+    connect(&m_channelRegistry, &ChannelRegistry::channelsChanged, this,
+            [this] {
+                if (!m_workspace) return;
+                for (const QString &key : m_workspace->componentIds()) {
+                    const WorkspaceComponentInstance instance =
+                        m_workspace->componentInstance(key);
+                    if (instance.definitionId != QStringLiteral("serial-scope.waveform")) {
+                        continue;
+                    }
+                    QString error;
+                    if (!applyComponentState(
+                            m_workspace->componentContentByInstance(instance.instanceId),
+                            instance, &error)
+                        && m_host && !error.isEmpty()) {
+                        m_host->log(QStringLiteral("warning"),
+                                    tr("波形绑定未更新：%1").arg(error));
+                    }
+                }
+            });
     m_uiFlush.setSingleShot(true);
     m_uiFlush.setInterval(50);
     m_uiFlush.setTimerType(Qt::PreciseTimer);
@@ -236,11 +209,10 @@ WorkspaceUiProvider *SerialScopeWorkspace::workspaceUiProvider()
 
 QList<WorkspaceComponentDefinition> SerialScopeWorkspace::componentDefinitions() const
 {
-    const WorkspaceComponentCapabilities commonCapabilities =
+    const WorkspaceComponentCapabilities canvasCapabilities =
         WorkspaceComponentCapability::Movable
         | WorkspaceComponentCapability::Resizable
-        | WorkspaceComponentCapability::Maximizable
-        | WorkspaceComponentCapability::PropertyEditing;
+        | WorkspaceComponentCapability::Maximizable;
     return {
         {
             .definitionId = QStringLiteral("serial-scope.waveform"),
@@ -250,13 +222,34 @@ QList<WorkspaceComponentDefinition> SerialScopeWorkspace::componentDefinitions()
             .iconSource = QStringLiteral(":/serein/waveform.svg"),
             .defaultSize = QSize(640, 320),
             .minimumSize = QSize(360, 210),
-            .capabilities = commonCapabilities
+            .capabilities = canvasCapabilities
+                | WorkspaceComponentCapability::PropertyEditing
                 | WorkspaceComponentCapability::DataBinding,
             .bindingKinds = WorkspaceBindingKind::SampleChannel,
             .properties = {
                 {QStringLiteral("lineWidth"), tr("线宽"), QStringLiteral("double"),
                  1.35, {{QStringLiteral("min"), 0.5}, {QStringLiteral("max"), 4.0}}},
             },
+        },
+        {
+            .definitionId = QStringLiteral("serial-scope.channels"),
+            .providerId = QStringLiteral("serial-scope"),
+            .displayName = tr("数据通道"),
+            .category = tr("数据源"),
+            .iconSource = QStringLiteral(":/serein/channels.svg"),
+            .defaultSize = QSize(240, 300),
+            .minimumSize = QSize(180, 210),
+            .capabilities = canvasCapabilities,
+        },
+        {
+            .definitionId = QStringLiteral("serial-scope.terminal"),
+            .providerId = QStringLiteral("serial-scope"),
+            .displayName = tr("串口终端"),
+            .category = tr("调试工具"),
+            .iconSource = QStringLiteral(":/serein/terminal.svg"),
+            .defaultSize = QSize(720, 190),
+            .minimumSize = QSize(520, 130),
+            .capabilities = canvasCapabilities,
         },
     };
 }
@@ -266,17 +259,149 @@ QWidget *SerialScopeWorkspace::createComponent(const QString &definitionId,
 {
     const QString id = definitionId.trimmed();
     if (id == QStringLiteral("serial-scope.waveform")) {
-        auto *waveform = new WaveformWidget(parent);
-        m_waveformViews.append(waveform);
-        return waveform;
+        return createWaveformComponent(parent);
+    }
+    if (id == QStringLiteral("serial-scope.channels")) {
+        return createChannelsComponent(parent);
+    }
+    if (id == QStringLiteral("serial-scope.terminal")) {
+        return createTerminalComponent(parent);
     }
     return nullptr;
 }
 
+QWidget *SerialScopeWorkspace::createWaveformComponent(QWidget *parent)
+{
+    auto *panel = new QFrame(parent);
+    panel->setObjectName(QStringLiteral("panel"));
+    auto *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(10, 10, 10, 10);
+    auto *header = new QHBoxLayout;
+    m_rate = new QLabel(QStringLiteral("0 B/s  ·  buffer 0 B"), panel);
+    m_rate->setObjectName(QStringLiteral("pageSubtitle"));
+    auto *clear = new QPushButton(tr("清空"), panel);
+    clear->setProperty("kind", QStringLiteral("quiet"));
+    header->addWidget(m_rate);
+    header->addStretch();
+    header->addWidget(clear);
+    layout->addLayout(header);
+
+    m_waveform = new WaveformWidget(panel);
+    m_waveform->setObjectName(QStringLiteral("serialWaveform"));
+    m_waveformViews.append(m_waveform);
+    layout->addWidget(m_waveform, 1);
+    connect(clear, &QPushButton::clicked, this, &SerialScopeWorkspace::clearData);
+    return panel;
+}
+
+QWidget *SerialScopeWorkspace::createChannelsComponent(QWidget *parent)
+{
+    auto *panel = new QFrame(parent);
+    panel->setObjectName(QStringLiteral("panel"));
+    auto *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(10, 10, 10, 10);
+    auto *hint = new QLabel(tr("勾选决定波形可见性"), panel);
+    hint->setObjectName(QStringLiteral("pageSubtitle"));
+    m_channels = new QListWidget(panel);
+    m_channels->setObjectName(QStringLiteral("channelList"));
+    layout->addWidget(hint);
+    layout->addWidget(m_channels, 1);
+    connect(m_channels, &QListWidget::itemChanged,
+            this, &SerialScopeWorkspace::channelVisibilityChanged);
+    return panel;
+}
+
+QWidget *SerialScopeWorkspace::createTerminalComponent(QWidget *parent)
+{
+    auto *panel = new QFrame(parent);
+    panel->setObjectName(QStringLiteral("panel"));
+    auto *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(10, 9, 10, 10);
+    m_terminal = new QPlainTextEdit(panel);
+    m_terminal->setObjectName(QStringLiteral("serialTerminalOutput"));
+    m_terminal->setReadOnly(true);
+    m_terminal->document()->setMaximumBlockCount(1200);
+    m_terminal->setMaximumHeight(160);
+    layout->addWidget(m_terminal);
+
+    auto *sendRow = new QHBoxLayout;
+    m_command = new QLineEdit(panel);
+    m_command->setObjectName(QStringLiteral("serialCommandInput"));
+    m_command->setPlaceholderText(tr("发送文本命令"));
+    m_ending = new QComboBox(panel);
+    m_ending->addItems({QStringLiteral("LF"), QStringLiteral("CRLF"), tr("无换行")});
+    m_command->setEnabled(false);
+    m_ending->setEnabled(false);
+    auto *send = new QPushButton(tr("发送"), panel);
+    send->setObjectName(QStringLiteral("serialSendButton"));
+    sendRow->addWidget(m_command, 1);
+    sendRow->addWidget(m_ending);
+    sendRow->addWidget(send);
+    layout->addLayout(sendRow);
+    connect(send, &QPushButton::clicked, this, &SerialScopeWorkspace::sendCommand);
+    return panel;
+}
+
+bool SerialScopeWorkspace::applyComponentState(
+    QWidget *component, const WorkspaceComponentInstance &instance,
+    QString *error)
+{
+    if (instance.definitionId != QStringLiteral("serial-scope.waveform")) {
+        return true;
+    }
+    auto *waveform = qobject_cast<WaveformWidget *>(component);
+    if (!waveform && component) {
+        waveform = component->findChild<WaveformWidget *>();
+    }
+    if (!waveform) {
+        if (error) *error = tr("实时波形实例缺少 WaveformWidget");
+        return false;
+    }
+
+    const QVariant lineWidth = instance.properties.value(
+        QStringLiteral("lineWidth"), 1.35);
+    waveform->setLineWidth(lineWidth.toDouble());
+
+    QSet<int> boundIndices;
+    for (const WorkspaceBinding &binding : instance.bindings) {
+        if (binding.kind != WorkspaceBindingKind::SampleChannel
+            || binding.channelId.trimmed().isEmpty()) {
+            continue;
+        }
+        const WorkspaceChannelDescriptor descriptor =
+            m_channelRegistry.channel(binding.channelId);
+        bool validIndex = false;
+        const int index = descriptor.metadata.value(
+            QStringLiteral("index")).toInt(&validIndex);
+        if (descriptor.kind == WorkspaceBindingKind::SampleChannel
+            && validIndex && index >= 0) {
+            boundIndices.insert(index);
+        }
+    }
+    // A newly added binding starts empty in the Inspector. Keep the normal
+    // all-channel view until at least one binding resolves to a registered
+    // channel; an incomplete edit must not make a live plot disappear.
+    const bool hasResolvedBinding = !boundIndices.isEmpty();
+    waveform->setBoundChannelIndices(std::move(boundIndices),
+                                     hasResolvedBinding);
+    return true;
+}
+
 bool SerialScopeWorkspace::activateLibraryComponent(const QString &componentId)
 {
+    QString normalized = componentId.trimmed();
+    // Keep the historical short IDs accepted by older QML shells, while all
+    // newly published definitions and persisted instances use provider-
+    // qualified IDs.
+    if (normalized == QStringLiteral("waveform")) {
+        normalized = QStringLiteral("serial-scope.waveform");
+    } else if (normalized == QStringLiteral("channels")) {
+        normalized = QStringLiteral("serial-scope.channels");
+    } else if (normalized == QStringLiteral("terminal")) {
+        normalized = QStringLiteral("serial-scope.terminal");
+    }
     return m_workspace
-        && m_workspace->addOrShowComponentAt(componentId, QPoint(-1, -1));
+        && m_workspace->addOrShowComponentAt(normalized, QPoint(-1, -1));
 }
 
 void SerialScopeWorkspace::refreshPorts()
@@ -357,6 +482,11 @@ quint64 SerialScopeWorkspace::coalescedUiSamples() const noexcept
 quint64 SerialScopeWorkspace::coalescedTerminalLines() const noexcept
 {
     return m_totalCoalescedTerminalLines;
+}
+
+ChannelRegistry *SerialScopeWorkspace::channelRegistry() noexcept
+{
+    return &m_channelRegistry;
 }
 
 void SerialScopeWorkspace::setEngine(const QString &engine)
@@ -529,6 +659,7 @@ void SerialScopeWorkspace::clearData()
     }
     m_channels->clear();
     m_terminal->clear();
+    m_channelRegistry.clear();
 }
 
 void SerialScopeWorkspace::rebuildDecoder()
@@ -568,6 +699,12 @@ void SerialScopeWorkspace::syncChannels(const SamplePacket &sample)
 
 void SerialScopeWorkspace::appendPacket(const Packet &packet)
 {
+    QString publishError;
+    if (!m_channelRegistry.publish(packet, &publishError) && m_host
+        && !publishError.isEmpty()) {
+        m_host->log(QStringLiteral("warning"),
+                    tr("通道发布失败：%1").arg(publishError));
+    }
     if (const auto *sample = std::get_if<SamplePacket>(&packet)) {
         m_pendingSamples.enqueue(*sample);
         while (m_pendingSamples.size() > MaxPendingSamples) {

@@ -179,11 +179,18 @@ void ComponentSurface::setTitle(const QString &title)
 
 struct WorkspaceCanvas::ComponentEntry {
     QPointer<ComponentFrame> frame;
+    QPointer<QWidget> content;
+    QUuid instanceId;
+    QString definitionId;
     QRectF defaultGeometry;
     QRectF normalizedGeometry;
     QSize minimumSize;
     int zOrder = 0;
     bool visible = true;
+    bool locked = true;
+    QList<WorkspaceBinding> bindings;
+    QVariantMap properties;
+    QJsonObject extensions;
 };
 
 class WorkspaceCanvasPrivate {
@@ -203,9 +210,11 @@ public:
     bool applyingLayout = false;
 };
 
-ComponentFrame::ComponentFrame(QString componentId, QString title, QWidget *content,
+ComponentFrame::ComponentFrame(QString componentId, QString definitionId,
+                               QUuid instanceId, QString title, QWidget *content,
                                QWidget *parent)
-    : QFrame(parent), m_componentId(std::move(componentId))
+    : QFrame(parent), m_componentId(std::move(componentId)),
+      m_definitionId(std::move(definitionId)), m_instanceId(std::move(instanceId))
 {
     setObjectName(QStringLiteral("workspaceComponent"));
     setMouseTracking(true);
@@ -264,6 +273,21 @@ ComponentFrame::~ComponentFrame() = default;
 QString ComponentFrame::componentId() const
 {
     return m_componentId;
+}
+
+QString ComponentFrame::definitionId() const
+{
+    return m_definitionId;
+}
+
+QUuid ComponentFrame::instanceId() const
+{
+    return m_instanceId;
+}
+
+void ComponentFrame::setInstanceId(const QUuid &instanceId)
+{
+    if (!instanceId.isNull()) m_instanceId = instanceId;
 }
 
 void ComponentFrame::setEditLocked(const bool locked)
@@ -575,8 +599,34 @@ ComponentFrame *WorkspaceCanvas::addComponent(const QString &componentId,
                                                const QSize &minimumSize)
 {
     if (componentId.trimmed().isEmpty() || !content) return nullptr;
-    if (d->components.contains(componentId)) return d->components[componentId].frame;
-    auto *frame = new ComponentFrame(componentId, title, content, this);
+    if (ComponentFrame *existing = componentFrame(componentId)) return existing;
+    QUuid savedInstanceId;
+    {
+        QSettings settings;
+        settings.beginGroup(d->settingsGroup);
+        if (settings.value(QStringLiteral("layoutVersion")).toInt() == LayoutVersion) {
+            savedInstanceId = QUuid(settings.value(
+                QStringLiteral("components/%1/instanceId").arg(componentId)).toString());
+        }
+        settings.endGroup();
+    }
+    return addComponentInstance(componentId, savedInstanceId, title, content,
+                                defaultGeometry, minimumSize, true);
+}
+
+ComponentFrame *WorkspaceCanvas::addComponentInstance(
+    const QString &definitionId, const QUuid &requestedInstanceId,
+    const QString &title, QWidget *content, const QRectF &defaultGeometry,
+    const QSize &minimumSize, const bool loadLegacySettings)
+{
+    const QString normalizedDefinitionId = definitionId.trimmed();
+    if (normalizedDefinitionId.isEmpty() || !content) return nullptr;
+    const QUuid instanceId = requestedInstanceId.isNull()
+        ? QUuid::createUuid() : requestedInstanceId;
+    const QString componentKey = instanceId.toString(QUuid::WithoutBraces);
+    if (d->components.contains(componentKey)) return d->components[componentKey].frame;
+    auto *frame = new ComponentFrame(componentKey, normalizedDefinitionId,
+                                     instanceId, title, content, this);
     const QSize safeMinimumSize(std::max(0, minimumSize.width()),
                                 std::max(0, minimumSize.height()));
     frame->setMinimumSize(safeMinimumSize);
@@ -584,14 +634,19 @@ ComponentFrame *WorkspaceCanvas::addComponent(const QString &componentId,
 
     ComponentEntry entry;
     entry.frame = frame;
+    entry.content = content;
+    entry.instanceId = instanceId;
+    entry.definitionId = normalizedDefinitionId;
     entry.defaultGeometry = isNormalizedGeometryValid(defaultGeometry)
         ? defaultGeometry : QRectF(0.02, 0.02, 0.96, 0.96);
     entry.normalizedGeometry = entry.defaultGeometry;
     entry.minimumSize = safeMinimumSize;
     entry.zOrder = d->componentOrder.size();
-    loadEntry(entry, componentId);
-    d->components.insert(componentId, entry);
-    d->componentOrder.append(componentId);
+    entry.locked = d->editLocked;
+    if (loadLegacySettings) loadEntry(entry, normalizedDefinitionId);
+    frame->setInstanceId(entry.instanceId);
+    d->components.insert(componentKey, entry);
+    d->componentOrder.append(componentKey);
 
     connect(frame, &ComponentFrame::activated,
             this, &WorkspaceCanvas::activateFrame);
@@ -612,15 +667,278 @@ ComponentFrame *WorkspaceCanvas::addComponent(const QString &componentId,
     return frame;
 }
 
+WorkspaceDocument WorkspaceCanvas::document() const
+{
+    WorkspaceDocument result = WorkspaceDocument::createDefault(
+        property("documentTitle").toString().trimmed().isEmpty()
+            ? QStringLiteral("Workspace")
+            : property("documentTitle").toString(),
+        d->settingsGroup);
+    result.setTargetProfile(QStringLiteral("canvas"));
+    WorkspaceDocumentPage &page = result.pages().first();
+    page.pageId = QStringLiteral("main");
+    page.title = result.title();
+    page.components.clear();
+    page.components.reserve(d->componentOrder.size());
+    for (const QString &id : std::as_const(d->componentOrder)) {
+        const auto iterator = d->components.constFind(id);
+        if (iterator == d->components.cend()) continue;
+        WorkspaceComponentInstance instance = componentInstance(id);
+        instance.maximized = d->maximizedFrame
+            && d->maximizedFrame->componentId() == id;
+        page.components.append(std::move(instance));
+    }
+    return result;
+}
+
+bool WorkspaceCanvas::applyDocument(const WorkspaceDocument &source,
+                                    QString *error)
+{
+    auto setError = [error](const QString &message) {
+        if (error) *error = message;
+    };
+    if (!source.validate(error)) return false;
+    if (source.pages().size() != 1) {
+        setError(QStringLiteral("当前画布只支持包含一个页面的工作台文档"));
+        return false;
+    }
+
+    const WorkspaceDocumentPage &page = source.pages().first();
+    QHash<QString, const WorkspaceComponentInstance *> requested;
+    bool requestedLocked = d->editLocked;
+    bool hasLockedState = false;
+    QString maximizedKey;
+    for (const WorkspaceComponentInstance &instance : page.components) {
+        QString key;
+        for (auto it = d->components.cbegin(); it != d->components.cend(); ++it) {
+            if (it->instanceId == instance.instanceId) {
+                key = it.key();
+                break;
+            }
+        }
+        if (key.isEmpty()) {
+            QStringList candidates;
+            for (auto it = d->components.cbegin(); it != d->components.cend(); ++it) {
+                if (it->definitionId == instance.definitionId && !requested.contains(it.key())) {
+                    candidates.append(it.key());
+                }
+            }
+            if (candidates.size() == 1) key = candidates.first();
+        }
+        if (key.isEmpty() || !d->components.value(key).frame
+            || d->components.value(key).definitionId != instance.definitionId) {
+            setError(QStringLiteral("画布缺少组件定义或实例：%1")
+                         .arg(instance.definitionId));
+            return false;
+        }
+        if (instance.maximized) {
+            if (!maximizedKey.isEmpty()) {
+                setError(QStringLiteral("工作台最多只能有一个全屏组件"));
+                return false;
+            }
+            maximizedKey = key;
+        }
+        if (!hasLockedState) {
+            requestedLocked = instance.locked;
+            hasLockedState = true;
+        } else if (requestedLocked != instance.locked) {
+            setError(QStringLiteral("当前画布只支持统一的锁定状态"));
+            return false;
+        }
+        requested.insert(key, &instance);
+    }
+
+    // All validation and lookups completed. Mutate the live canvas only now,
+    // keeping failure paths free of partially applied layouts.
+    leaveMaximized();
+    for (const QString &id : std::as_const(d->componentOrder)) {
+        ComponentEntry &entry = d->components[id];
+        const auto requestedIt = requested.constFind(id);
+        if (requestedIt == requested.cend()) {
+            entry.visible = false;
+            if (entry.frame) entry.frame->hide();
+            continue;
+        }
+        const WorkspaceComponentInstance &instance = *requestedIt.value();
+        entry.instanceId = instance.instanceId;
+        if (entry.frame) entry.frame->setInstanceId(entry.instanceId);
+        entry.normalizedGeometry = instance.normalizedGeometry;
+        entry.zOrder = instance.zOrder;
+        entry.visible = instance.visible;
+        entry.locked = instance.locked;
+        entry.bindings = instance.bindings;
+        entry.properties = instance.properties;
+        entry.extensions = instance.extensions;
+        if (entry.frame) entry.frame->setVisible(entry.visible);
+    }
+    setEditLocked(requestedLocked);
+    applyComponentGeometries();
+    applyZOrder();
+    if (!maximizedKey.isEmpty()) {
+        if (ComponentFrame *frame = d->components.value(maximizedKey).frame) {
+            frame->setVisible(true);
+            enterMaximized(frame);
+        }
+    }
+    saveLayout();
+    for (const WorkspaceComponentInstance &instance : page.components) {
+        emit componentStateChanged(instance);
+    }
+    emit layoutChanged();
+    return true;
+}
+
 ComponentFrame *WorkspaceCanvas::componentFrame(const QString &componentId) const
 {
-    const auto iterator = d->components.constFind(componentId);
-    return iterator == d->components.cend() ? nullptr : iterator->frame;
+    const QString query = componentId.trimmed();
+    const auto iterator = d->components.constFind(query);
+    if (iterator != d->components.cend()) return iterator->frame;
+    for (const QString &key : std::as_const(d->componentOrder)) {
+        const auto it = d->components.constFind(key);
+        if (it != d->components.cend() && it->definitionId == query) return it->frame;
+    }
+    return nullptr;
+}
+
+ComponentFrame *WorkspaceCanvas::componentFrameByInstance(const QUuid &instanceId) const
+{
+    if (instanceId.isNull()) return nullptr;
+    for (const QString &key : std::as_const(d->componentOrder)) {
+        const auto it = d->components.constFind(key);
+        if (it != d->components.cend() && it->instanceId == instanceId) return it->frame;
+    }
+    return nullptr;
 }
 
 QStringList WorkspaceCanvas::componentIds() const
 {
     return d->componentOrder;
+}
+
+QString WorkspaceCanvas::selectedComponentId() const
+{
+    return d->selectedFrame ? d->selectedFrame->componentId() : QString{};
+}
+
+WorkspaceComponentInstance WorkspaceCanvas::componentInstance(
+    const QString &componentId) const
+{
+    WorkspaceComponentInstance result;
+    const QString query = componentId.trimmed();
+    auto iterator = d->components.constFind(query);
+    if (iterator == d->components.cend()) {
+        for (const QString &key : std::as_const(d->componentOrder)) {
+            const auto candidate = d->components.constFind(key);
+            if (candidate != d->components.cend() && candidate->definitionId == query) {
+                iterator = candidate;
+                break;
+            }
+        }
+    }
+    if (iterator == d->components.cend()) {
+        result.instanceId = QUuid();
+        return result;
+    }
+    const ComponentEntry &entry = iterator.value();
+    result.instanceId = entry.instanceId;
+    result.definitionId = entry.definitionId;
+    result.normalizedGeometry = entry.normalizedGeometry;
+    result.zOrder = entry.zOrder;
+    result.visible = entry.visible;
+    result.locked = entry.locked;
+    result.bindings = entry.bindings;
+    result.properties = entry.properties;
+    result.extensions = entry.extensions;
+    result.maximized = d->maximizedFrame
+        && d->maximizedFrame->componentId() == iterator.key();
+    return result;
+}
+
+QWidget *WorkspaceCanvas::componentContent(const QString &componentId) const
+{
+    const QString query = componentId.trimmed();
+    const auto frame = componentFrame(query);
+    if (!frame) return nullptr;
+    const auto iterator = d->components.constFind(frame->componentId());
+    return iterator == d->components.cend() ? nullptr : iterator->content.data();
+}
+
+QWidget *WorkspaceCanvas::componentContentByInstance(const QUuid &instanceId) const
+{
+    if (ComponentFrame *frame = componentFrameByInstance(instanceId)) {
+        const auto iterator = d->components.constFind(frame->componentId());
+        return iterator == d->components.cend() ? nullptr : iterator->content.data();
+    }
+    return nullptr;
+}
+
+bool WorkspaceCanvas::removeComponentInstance(const QUuid &instanceId)
+{
+    ComponentFrame *frame = componentFrameByInstance(instanceId);
+    if (!frame) return false;
+    const QString key = frame->componentId();
+    if (d->maximizedFrame == frame) leaveMaximized();
+    if (d->selectedFrame == frame) clearSelection();
+    d->componentOrder.removeAll(key);
+    d->components.remove(key);
+    delete frame;
+    saveLayout();
+    update();
+    emit layoutChanged();
+    return true;
+}
+
+bool WorkspaceCanvas::updateComponentInstance(
+    const WorkspaceComponentInstance &instance, QString *error)
+{
+    const QString id = instance.definitionId.trimmed();
+    QString key;
+    if (!instance.instanceId.isNull()) {
+        if (ComponentFrame *frame = componentFrameByInstance(instance.instanceId)) {
+            key = frame->componentId();
+        }
+    }
+    if (key.isEmpty()) {
+        if (ComponentFrame *frame = componentFrame(id)) key = frame->componentId();
+    }
+    const auto iterator = d->components.find(key);
+    if (iterator == d->components.end() || !iterator->frame) {
+        if (error) *error = QStringLiteral("画布缺少组件定义：%1").arg(id);
+        return false;
+    }
+    if (instance.instanceId.isNull()) {
+        if (error) *error = QStringLiteral("组件实例 UUID 无效：%1").arg(id);
+        return false;
+    }
+    if (!isNormalizedGeometryValid(instance.normalizedGeometry)) {
+        if (error) *error = QStringLiteral("组件几何无效：%1").arg(id);
+        return false;
+    }
+    if (instance.locked != d->editLocked) {
+        if (error) *error = QStringLiteral("当前画布只支持统一的锁定状态");
+        return false;
+    }
+    ComponentEntry &entry = iterator.value();
+    entry.instanceId = instance.instanceId;
+    entry.normalizedGeometry = instance.normalizedGeometry;
+    entry.zOrder = instance.zOrder;
+    entry.visible = instance.visible;
+    entry.locked = instance.locked;
+    entry.bindings = instance.bindings;
+    entry.properties = instance.properties;
+    entry.extensions = instance.extensions;
+    if (entry.frame) entry.frame->setVisible(entry.visible);
+    if (instance.maximized) {
+        enterMaximized(entry.frame);
+    } else if (isComponentMaximized(key)) {
+        leaveMaximized();
+    }
+    applyComponentGeometries();
+    applyZOrder();
+    saveLayout();
+    emit componentStateChanged(componentInstance(key));
+    emit layoutChanged();
+    return true;
 }
 
 bool WorkspaceCanvas::hasStoredLayout() const
@@ -639,6 +957,7 @@ void WorkspaceCanvas::setEditLocked(const bool locked)
     d->editLocked = locked;
     for (const QString &id : std::as_const(d->componentOrder)) {
         if (ComponentFrame *frame = componentFrame(id)) frame->setEditLocked(locked);
+        d->components[id].locked = locked;
     }
     if (locked) {
         clearSelection();
@@ -656,32 +975,36 @@ bool WorkspaceCanvas::editLocked() const
 
 void WorkspaceCanvas::setComponentVisible(const QString &componentId, const bool visible)
 {
-    auto iterator = d->components.find(componentId);
+    ComponentFrame *frame = componentFrame(componentId);
+    if (!frame) return;
+    auto iterator = d->components.find(frame->componentId());
     if (iterator == d->components.end() || iterator->visible == visible) return;
-    if (d->maximizedFrame && d->maximizedFrame->componentId() == componentId && !visible) {
+    if (d->maximizedFrame && d->maximizedFrame->componentId() == frame->componentId()
+        && !visible) {
         leaveMaximized();
     }
     iterator->visible = visible;
     if (iterator->frame) iterator->frame->setVisible(visible);
     if (!visible && d->selectedFrame == iterator->frame) clearSelection();
     saveLayout();
-    emit componentVisibilityChanged(componentId, visible);
+    emit componentVisibilityChanged(iterator->definitionId, visible);
     emit layoutChanged();
 }
 
 bool WorkspaceCanvas::addOrShowComponentAt(const QString &componentId,
-                                            const QPoint &position)
+                                             const QPoint &position)
 {
-    auto iterator = d->components.find(componentId);
+    ComponentFrame *frame = componentFrame(componentId);
+    if (!frame) return false;
+    auto iterator = d->components.find(frame->componentId());
     if (iterator == d->components.end() || !iterator->frame) return false;
     if (d->maximizedFrame) leaveMaximized();
 
     ComponentEntry &entry = iterator.value();
-    const bool newlyRevealed = !entry.visible;
     if (!entry.visible) {
         entry.visible = true;
         entry.frame->show();
-        emit componentVisibilityChanged(componentId, true);
+        emit componentVisibilityChanged(iterator->definitionId, true);
     }
 
     applyComponentGeometries();
@@ -694,13 +1017,10 @@ bool WorkspaceCanvas::addOrShowComponentAt(const QString &componentId,
         entry.normalizedGeometry = normalizedFromGeometry(target);
     }
 
-    const bool hasExplicitPosition = position.x() >= 0 && position.y() >= 0;
-    if (newlyRevealed && !hasExplicitPosition) {
-        enterMaximized(entry.frame);
-    } else {
-        setSelectedFrame(entry.frame);
-        activateFrame(entry.frame);
-    }
+    // Adding or revealing an instance selects it, but never changes display
+    // mode implicitly. Fullscreen remains an explicit component action.
+    setSelectedFrame(entry.frame);
+    activateFrame(entry.frame);
     saveLayout();
     update();
     emit layoutChanged();
@@ -709,7 +1029,9 @@ bool WorkspaceCanvas::addOrShowComponentAt(const QString &componentId,
 
 bool WorkspaceCanvas::isComponentVisible(const QString &componentId) const
 {
-    const auto iterator = d->components.constFind(componentId);
+    ComponentFrame *frame = componentFrame(componentId);
+    if (!frame) return false;
+    const auto iterator = d->components.constFind(frame->componentId());
     return iterator != d->components.cend() && iterator->visible;
 }
 
@@ -722,7 +1044,8 @@ void WorkspaceCanvas::toggleComponentMaximized(const QString &componentId)
 
 bool WorkspaceCanvas::isComponentMaximized(const QString &componentId) const
 {
-    return d->maximizedFrame && d->maximizedFrame->componentId() == componentId;
+    ComponentFrame *frame = componentFrame(componentId);
+    return d->maximizedFrame && frame && d->maximizedFrame == frame;
 }
 
 void WorkspaceCanvas::resetLayout()
@@ -995,16 +1318,20 @@ void WorkspaceCanvas::commitFrameGeometry(ComponentFrame *frame)
 
 void WorkspaceCanvas::clearSelection()
 {
-    if (d->selectedFrame) d->selectedFrame->setSelected(false);
+    if (!d->selectedFrame) return;
+    d->selectedFrame->setSelected(false);
     d->selectedFrame = nullptr;
+    emit componentSelectionChanged(QString{});
 }
 
 void WorkspaceCanvas::setSelectedFrame(ComponentFrame *frame)
 {
     if (d->selectedFrame == frame) return;
-    clearSelection();
+    if (d->selectedFrame) d->selectedFrame->setSelected(false);
     d->selectedFrame = frame;
     if (d->selectedFrame) d->selectedFrame->setSelected(true);
+    emit componentSelectionChanged(d->selectedFrame
+                                       ? d->selectedFrame->componentId() : QString{});
 }
 
 void WorkspaceCanvas::closeFrame(ComponentFrame *frame)
@@ -1057,10 +1384,15 @@ void WorkspaceCanvas::saveLayout() const
         const auto iterator = d->components.constFind(id);
         if (iterator == d->components.cend()) continue;
         const ComponentEntry &entry = iterator.value();
-        settings.setValue(QStringLiteral("components/%1/geometry").arg(id),
+        const QString instanceKey = entry.instanceId.toString(QUuid::WithoutBraces);
+        settings.setValue(QStringLiteral("components/%1/definitionId").arg(instanceKey),
+                          entry.definitionId);
+        settings.setValue(QStringLiteral("components/%1/geometry").arg(instanceKey),
                           entry.normalizedGeometry);
-        settings.setValue(QStringLiteral("components/%1/zOrder").arg(id), entry.zOrder);
-        settings.setValue(QStringLiteral("components/%1/visible").arg(id), entry.visible);
+        settings.setValue(QStringLiteral("components/%1/instanceId").arg(instanceKey),
+                          entry.instanceId.toString(QUuid::WithoutBraces));
+        settings.setValue(QStringLiteral("components/%1/zOrder").arg(instanceKey), entry.zOrder);
+        settings.setValue(QStringLiteral("components/%1/visible").arg(instanceKey), entry.visible);
     }
     settings.endGroup();
 }
@@ -1070,12 +1402,24 @@ void WorkspaceCanvas::loadEntry(ComponentEntry &entry, const QString &componentI
     QSettings settings;
     settings.beginGroup(d->settingsGroup);
     if (settings.value(QStringLiteral("layoutVersion")).toInt() == LayoutVersion) {
+        const QString legacyPrefix = QStringLiteral("components/%1/").arg(componentId);
+        const QUuid legacyInstanceId(settings.value(
+            legacyPrefix + QStringLiteral("instanceId")).toString());
+        const QString instanceKey = (legacyInstanceId.isNull()
+            ? entry.instanceId : legacyInstanceId).toString(QUuid::WithoutBraces);
+        const QString instancePrefix = QStringLiteral("components/%1/").arg(instanceKey);
+        const QString prefix = settings.contains(
+            instancePrefix + QStringLiteral("instanceId"))
+                ? instancePrefix : legacyPrefix;
+        const QUuid savedInstanceId(settings.value(
+            prefix + QStringLiteral("instanceId")).toString());
+        if (!savedInstanceId.isNull()) entry.instanceId = savedInstanceId;
         const QRectF saved = settings.value(
-            QStringLiteral("components/%1/geometry").arg(componentId)).toRectF();
+            prefix + QStringLiteral("geometry")).toRectF();
         if (isNormalizedGeometryValid(saved)) entry.normalizedGeometry = saved;
-        entry.zOrder = settings.value(QStringLiteral("components/%1/zOrder").arg(componentId),
+        entry.zOrder = settings.value(prefix + QStringLiteral("zOrder"),
                                       entry.zOrder).toInt();
-        entry.visible = settings.value(QStringLiteral("components/%1/visible").arg(componentId),
+        entry.visible = settings.value(prefix + QStringLiteral("visible"),
                                        true).toBool();
     }
     settings.endGroup();

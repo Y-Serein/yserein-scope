@@ -9,7 +9,7 @@ class NumericDisplayControl final {
 public:
     struct State {
         QString id = QStringLiteral("number_value");
-        QString binding = QStringLiteral("telemetry.value");
+        QString binding = QStringLiteral("telemetry.temperature");
         double previewValue = 0.0;
         int decimals = 1;
         QString unit;

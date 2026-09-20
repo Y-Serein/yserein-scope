@@ -351,6 +351,7 @@ LivePage::LivePage(IHostServices *host, QWidget *parent)
     m_thermal->setObjectName(QStringLiteral("tn160ThermalView"));
     m_thermal->setCrosshairVisible(true);
     m_thermal->setExtremaVisible(true);
+    m_componentThermals.append(m_thermal);
     imageLayout->addWidget(m_thermal, 1);
 
     // The host owns the panel chrome and layout. The component owns the
@@ -358,8 +359,9 @@ LivePage::LivePage(IHostServices *host, QWidget *parent)
     m_trend = new TrendWidget(this);
     m_trend->setObjectName(QStringLiteral("tn160TrendWidget"));
     m_trend->hide();
+    m_componentTrends.append(m_trend);
 
-    m_workspace->addComponent(QStringLiteral("thermal"), tr("TN160 热图"),
+    m_workspace->addComponent(QStringLiteral("tn160.thermal"), tr("TN160 热图"),
                               imageContent, QRectF(0.0, 0.0, 1.0, 1.0),
                               QSize(380, 220));
 
@@ -557,10 +559,98 @@ QWidget *LivePage::outputPanel() const noexcept
     return m_trend;
 }
 
+QList<WorkspaceComponentDefinition> LivePage::componentDefinitions() const
+{
+    const auto common = WorkspaceComponentCapability::Movable
+        | WorkspaceComponentCapability::Resizable
+        | WorkspaceComponentCapability::Maximizable
+        | WorkspaceComponentCapability::Cloneable;
+    return {
+        {QStringLiteral("tn160.thermal"), QStringLiteral("tn160"),
+         tr("TN160 热图"), tr("实时诊断"), QStringLiteral(":/serein/thermal.svg"),
+         QSize(640, 420), QSize(380, 220),
+         common | WorkspaceComponentCapability::DataBinding,
+         WorkspaceBindingKind::ImageChannel, {}},
+        {QStringLiteral("tn160.measurements"), QStringLiteral("tn160"),
+         tr("关键测量"), tr("实时诊断"), QString(), QSize(280, 220), QSize(220, 160),
+         common | WorkspaceComponentCapability::DataBinding
+             | WorkspaceComponentCapability::PropertyEditing,
+         WorkspaceBindingKind::SampleChannel, {}},
+        {QStringLiteral("tn160.trend"), QStringLiteral("tn160"),
+         tr("实时趋势"), tr("实时诊断"), QString(), QSize(640, 260), QSize(320, 160),
+         common | WorkspaceComponentCapability::DataBinding,
+         WorkspaceBindingKind::SampleChannel, {}},
+    };
+}
+
+QWidget *LivePage::createComponent(const QString &definitionId, QWidget *parent)
+{
+    const QString id = definitionId.trimmed();
+    if (id == QStringLiteral("tn160.thermal") || id == QStringLiteral("thermal")) {
+        auto *thermal = new ThermalView(parent);
+        thermal->setObjectName(QStringLiteral("tn160ThermalComponent"));
+        thermal->setCrosshairVisible(true);
+        thermal->setExtremaVisible(true);
+        m_componentThermals.append(thermal);
+        return thermal;
+    }
+    if (id == QStringLiteral("tn160.trend")) {
+        auto *trend = new TrendWidget(parent);
+        trend->setObjectName(QStringLiteral("tn160TrendComponent"));
+        m_componentTrends.append(trend);
+        return trend;
+    }
+    if (id == QStringLiteral("tn160.measurements")) {
+        auto *panel = new QWidget(parent);
+        auto *layout = new QVBoxLayout(panel);
+        layout->setContentsMargins(12, 12, 12, 12);
+        layout->setSpacing(6);
+        auto addMetric = [panel, layout](const QString &name, QPointer<QLabel> *value,
+                                         bool primary = false) {
+            auto *row = new QFrame(panel);
+            row->setObjectName(primary ? QStringLiteral("metricPrimary")
+                                       : QStringLiteral("metricRow"));
+            auto *rowLayout = new QHBoxLayout(row);
+            rowLayout->setContentsMargins(4, 0, 4, 0);
+            auto *label = new QLabel(name, row);
+            label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+            auto *result = new QLabel(primary ? QStringLiteral("--.-- °C")
+                                              : QStringLiteral("—"), row);
+            result->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            result->setMinimumWidth(54);
+            rowLayout->addWidget(label, 1);
+            rowLayout->addWidget(result);
+            layout->addWidget(row);
+            *value = result;
+        };
+        QPointer<QLabel> center, ntc, fps, adu, vtemp;
+        addMetric(QStringLiteral("Center 5×5"), &center, true);
+        addMetric(QStringLiteral("NTC"), &ntc);
+        addMetric(QStringLiteral("Center ADU"), &adu);
+        addMetric(QStringLiteral("VTEMP ADU"), &vtemp);
+        addMetric(tr("帧率"), &fps);
+        layout->addStretch(1);
+        connect(this, &LivePage::telemetryChanged, panel,
+                [center, ntc, adu, vtemp, fps](const QString &c, const QString &n,
+                                               const QString &a, const QString &v,
+                                               const QString &f) {
+                    if (center) center->setText(c);
+                    if (ntc) ntc->setText(n);
+                    if (adu) adu->setText(a);
+                    if (vtemp) vtemp->setText(v);
+                    if (fps) fps->setText(f);
+                });
+        return panel;
+    }
+    return nullptr;
+}
+
 bool LivePage::activateLibraryComponent(const QString &componentId)
 {
-    return m_workspace
-        && m_workspace->addOrShowComponentAt(componentId, QPoint(-1, -1));
+    if (!m_workspace) return false;
+    const QString normalized = componentId == QStringLiteral("thermal")
+        ? QStringLiteral("tn160.thermal") : componentId;
+    return m_workspace->addOrShowComponentAt(normalized, QPoint(-1, -1));
 }
 
 void LivePage::shutdown()
@@ -632,8 +722,12 @@ void LivePage::toggleCapture()
     }
     m_session.setDecodingEnabled(true);
     m_session.resetDecoder();
-    m_trend->clear();
-    m_thermal->clear();
+    for (const auto &trend : std::as_const(m_componentTrends)) {
+        if (trend) trend->clear();
+    }
+    for (const auto &thermal : std::as_const(m_componentThermals)) {
+        if (thermal) thermal->clear();
+    }
     clearDiagnosticHistory();
     emit diagnosticsChanged(tr("等待完整 TN160 遥测帧"));
     clearPendingUi();
@@ -701,7 +795,9 @@ bool LivePage::rawCaptureActive() const noexcept
 
 void LivePage::clearDiagnosticSession()
 {
-    if (m_trend) m_trend->clear();
+    for (const auto &trend : std::as_const(m_componentTrends)) {
+        if (trend) trend->clear();
+    }
     clearDiagnosticHistory();
     if (m_elapsed.isValid()) m_elapsed.restart();
     emit diagnosticsChanged(tr("诊断历史已清空，等待新帧"));
@@ -912,7 +1008,7 @@ bool LivePage::processPackets(const PacketList &packets)
         } else if (const auto *sample = std::get_if<SamplePacket>(&packet)) {
             if (sample->values.size() >= 4) {
                 const double seconds = std::max(m_elapsed.elapsed() / 1000.0, 0.001);
-                m_trend->addSample({
+                const TrendSample trendSample{
                     seconds,
                     sampleValue(*sample, CenterPointC),
                     sampleValue(*sample, CenterRoiC),
@@ -926,7 +1022,10 @@ bool LivePage::processPackets(const PacketList &packets)
                     sampleInteger(*sample, NucDg),
                     sampleInteger(*sample, NucDv),
                     sampleInteger(*sample, NucDn),
-                });
+                };
+                for (const auto &trend : std::as_const(m_componentTrends)) {
+                    if (trend) trend->addSample(trendSample);
+                }
                 appendDiagnosticSample(*sample, seconds);
                 if (!m_pendingUiFrames.isEmpty()
                     && !m_pendingUiFrames.back().sample) {
@@ -981,8 +1080,10 @@ void LivePage::flushPendingUi()
 {
     if (m_pendingUiFrames.isEmpty()) return;
     const PendingUiFrame pending = m_pendingUiFrames.dequeue();
-    m_thermal->setFrame(pending.image.pixels,
-                        pending.image.width, pending.image.height);
+    for (const auto &thermal : std::as_const(m_componentThermals)) {
+        if (thermal) thermal->setFrame(pending.image.pixels,
+                                       pending.image.width, pending.image.height);
+    }
     const qint64 nowMs = m_elapsed.elapsed();
     m_renderFrameTimesMs.enqueue(nowMs);
     while (!m_renderFrameTimesMs.isEmpty()
@@ -1128,7 +1229,9 @@ void LivePage::updateSample(const SamplePacket &sample)
     info.tHighC = sampleValue(sample, THighC);
     info.vtemp = sampleValue(sample, VtempRaw);
     info.fps = fps;
-    m_thermal->setFrameInfo(info);
+    for (const auto &thermal : std::as_const(m_componentThermals)) {
+        if (thermal) thermal->setFrameInfo(info);
+    }
 
     const auto formatMetricTemperature = [](const double value) {
         return std::isfinite(value)

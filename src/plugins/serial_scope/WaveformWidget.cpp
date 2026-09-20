@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace serein::scope::serial {
 namespace {
@@ -85,6 +86,15 @@ void WaveformWidget::setLineWidth(const qreal width)
     update();
 }
 
+void WaveformWidget::setBoundChannelIndices(QSet<int> indices,
+                                             const bool bindingActive)
+{
+    if (m_boundChannelIndices == indices && m_bindingActive == bindingActive) return;
+    m_boundChannelIndices = std::move(indices);
+    m_bindingActive = bindingActive;
+    update();
+}
+
 void WaveformWidget::paintEvent(QPaintEvent *event)
 {
     Q_UNUSED(event)
@@ -114,7 +124,8 @@ void WaveformWidget::paintEvent(QPaintEvent *event)
     double maximum = -std::numeric_limits<double>::infinity();
     int sampleCount = 0;
     for (int index = 0; index < m_series.size(); ++index) {
-        if (!m_visible[index]) {
+        if (!m_visible[index]
+            || (m_bindingActive && !m_boundChannelIndices.contains(index))) {
             continue;
         }
         sampleCount = std::max(sampleCount, int(m_series[index].size()));
@@ -153,7 +164,9 @@ void WaveformWidget::paintEvent(QPaintEvent *event)
     const double range = maximum - minimum;
     for (int index = 0; index < m_series.size(); ++index) {
         const QQueue<double> &series = m_series[index];
-        if (!m_visible[index] || series.size() < 2) {
+        if (!m_visible[index]
+            || (m_bindingActive && !m_boundChannelIndices.contains(index))
+            || series.size() < 2) {
             continue;
         }
         QPainterPath path;

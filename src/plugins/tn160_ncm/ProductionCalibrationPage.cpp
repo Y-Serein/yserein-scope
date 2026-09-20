@@ -31,6 +31,7 @@
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QPushButton>
+#include <QtWidgets/QScrollArea>
 #include <QtWidgets/QSizePolicy>
 #include <QtWidgets/QStyle>
 #include <QtWidgets/QVBoxLayout>
@@ -51,6 +52,7 @@ constexpr int RawFrameSize = 2 + FrameHeight * RawWordsPerRow * 2 + 2;
 constexpr int FfcSoftSilenceMs = 700;
 constexpr int RawHardSilenceMs = 10000;
 constexpr int RequiredFrames = 32;
+constexpr int StateBHighFrames = 16;
 constexpr int MaximumFrames = 64;
 constexpr int SnapshotFrames = 3;
 constexpr qint64 MonitorTraceIntervalUs = 1000000;
@@ -63,6 +65,11 @@ constexpr int ProductSegment = 17;
 constexpr int GainBytes = PixelCount * int(sizeof(float));
 constexpr int BadPointBytes = 10;
 constexpr int WriteHeaderBytes = 64;
+constexpr int ThermalModelBytes = 64;
+constexpr qint64 StateBHoldUs = 180000000;
+constexpr int MinimumModelNtcSpanAdu = 32;
+constexpr int ThermalModelAnchorLimitAdu = 800;
+constexpr int ThermalModelGainLimitQ16 = 9830;
 constexpr quint16 NtcModelTag = 0x4e54u;
 constexpr quint16 ColdStartModelTag = 0x4354u;
 constexpr quint16 RowRefModelTag = 0x5252u;
@@ -135,6 +142,8 @@ QString ProductionCalibrationPage::captureName(const CaptureKind kind)
     switch (kind) {
     case CaptureKind::Low: return tr("0°C");
     case CaptureKind::High: return tr("50°C");
+    case CaptureKind::HighB: return tr("状态B 50°C");
+    case CaptureKind::Offset: return tr("状态B 0°C");
     case CaptureKind::None: break;
     }
     return tr("未知");
@@ -142,7 +151,8 @@ QString ProductionCalibrationPage::captureName(const CaptureKind kind)
 
 int ProductionCalibrationPage::requiredFramesFor(const CaptureKind kind)
 {
-    return kind == CaptureKind::None ? 0 : RequiredFrames;
+    if (kind == CaptureKind::None) return 0;
+    return kind == CaptureKind::HighB ? StateBHighFrames : RequiredFrames;
 }
 
 ProductionCalibrationPage::ProductionCalibrationPage(IHostServices *host,
@@ -166,6 +176,15 @@ ProductionCalibrationPage::ProductionCalibrationPage(IHostServices *host,
     m_productionLog->setReadOnly(true);
     m_productionLog->setMaximumBlockCount(300);
     m_productionLog->setPlaceholderText(tr("连接设备后显示生成记录"));
+    m_clearThermalModelButton = new QPushButton(
+        tr("清除B补偿"), m_contextPanel);
+    m_clearThermalModelButton->setObjectName(
+        QStringLiteral("tn160ProductionClearThermalModel"));
+    m_clearThermalModelButton->setProperty("kind", QStringLiteral("warning"));
+    m_clearThermalModelButton->setToolTip(
+        tr("清除逐机B补偿，保留基础V1和四台均值保底"));
+    m_clearThermalModelButton->hide();
+    contextLayout->addWidget(m_clearThermalModelButton);
     contextLayout->addWidget(m_productionLog, 1);
 
     auto *rowSurface = new ComponentSurface(QString{}, this);
@@ -194,16 +213,9 @@ ProductionCalibrationPage::ProductionCalibrationPage(IHostServices *host,
     m_stationDevice->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_rowStatus = new QLabel(tr("等待设备"), identity);
     m_rowStatus->setObjectName(QStringLiteral("statusPill"));
-    m_ntcStatus = new QLabel(
-        EnableRowRefProduction ? tr("RR参数：等待50°C采集")
-                               : tr("温漂模式：通用补偿"),
-        identity);
-    m_ntcStatus->setObjectName(QStringLiteral("tn160ProductionNtcStatus"));
-    m_ntcStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
     identityLayout->addWidget(m_stationTitle);
     identityLayout->addWidget(m_stationDevice);
     identityLayout->addWidget(m_rowStatus);
-    identityLayout->addWidget(m_ntcStatus);
     workflowLayout->addWidget(identity);
 
     auto *stepsPanel = new QWidget(m_rowFrame);
@@ -222,8 +234,12 @@ ProductionCalibrationPage::ProductionCalibrationPage(IHostServices *host,
     m_lowButton->setToolTip(tr("1、对准 0°C"));
     m_highButton = new QPushButton(tr("2、50°C"), stepsPanel);
     m_highButton->setToolTip(tr("2、对准 50°C"));
+    m_highBButton = new QPushButton(tr("3、保持 50°C"), stepsPanel);
+    m_highBButton->setToolTip(tr("保持 50°C 至状态B后采集16帧"));
+    m_offsetButton = new QPushButton(tr("4、回到 0°C"), stepsPanel);
+    m_offsetButton->setToolTip(tr("状态B下回到 0°C 并采集32帧"));
     const QList<QPushButton *> steps{
-        m_lowButton, m_highButton,
+        m_lowButton, m_highButton, m_highBButton, m_offsetButton,
     };
     for (int index = 0; index < steps.size(); ++index) {
         QPushButton *button = steps.at(index);
@@ -258,10 +274,10 @@ ProductionCalibrationPage::ProductionCalibrationPage(IHostServices *host,
     m_importButton->setObjectName(QStringLiteral("tn160ProductionImport"));
     m_exportButton = new QPushButton(tr("导出标定包"), actions);
     m_exportButton->setObjectName(QStringLiteral("tn160ProductionExport"));
-    m_restartButton = new QPushButton(tr("重新开始本轮"), actions);
+    m_restartButton = new QPushButton(tr("重新标定"), actions);
     m_restartButton->setObjectName(QStringLiteral("tn160ProductionRestart"));
     m_restartButton->setProperty("kind", QStringLiteral("warning"));
-    m_writeButton = new QPushButton(tr("3、写入并验证"), actions);
+    m_writeButton = new QPushButton(tr("5、写入并验证"), actions);
     m_writeButton->setObjectName(QStringLiteral("tn160ProductionWrite"));
     m_writeButton->setProperty("kind", QStringLiteral("primary"));
     m_testWriteButton = new QPushButton(tr("写入测试件"), actions);
@@ -281,9 +297,14 @@ ProductionCalibrationPage::ProductionCalibrationPage(IHostServices *host,
 
     m_outputPanel = new QWidget(this);
     m_outputPanel->setObjectName(QStringLiteral("tn160ProductionResultsPanel"));
-    auto *previews = new QVBoxLayout(m_outputPanel);
+    auto *previews = new QGridLayout(m_outputPanel);
     previews->setContentsMargins(0, 0, 0, 0);
     previews->setSpacing(10);
+    previews->setColumnStretch(0, 1);
+    previews->setColumnStretch(1, 1);
+    previews->setColumnStretch(2, 1);
+    previews->setRowStretch(0, 1);
+    previews->setRowStretch(1, 1);
     const auto makePreview = [](const QString &title,
                                 ThermalView::PaletteMode mode,
                                 ThermalView **view) {
@@ -298,48 +319,59 @@ ProductionCalibrationPage::ProductionCalibrationPage(IHostServices *host,
         chrome.bodyLayout->addWidget(*view, 1);
         return chrome.panel;
     };
-    auto *upperRowPanel = new QWidget(m_outputPanel);
-    upperRowPanel->setMinimumSize(0, 0);
-    upperRowPanel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-    auto *upperRow = new QHBoxLayout(upperRowPanel);
-    upperRow->setContentsMargins(0, 0, 0, 0);
-    upperRow->setSpacing(10);
-    upperRow->addWidget(makePreview(tr("0°C"),
+    previews->addWidget(makePreview(tr("0°C"),
                                     ThermalView::PaletteMode::Grayscale,
-                                    &m_lowView), 1);
-    upperRow->addWidget(makePreview(tr("50°C"),
+                                    &m_lowView), 0, 0);
+    previews->addWidget(makePreview(tr("50°C"),
                                     ThermalView::PaletteMode::Grayscale,
-                                    &m_highView), 1);
-    upperRow->addWidget(makePreview(tr("温差"),
+                                    &m_highView), 0, 1);
+    previews->addWidget(makePreview(tr("温差"),
                                     ThermalView::PaletteMode::Grayscale,
-                                    &m_diffView), 1);
-    previews->addWidget(upperRowPanel, 1);
-
-    auto *lowerRowPanel = new QWidget(m_outputPanel);
-    lowerRowPanel->setMinimumSize(0, 0);
-    lowerRowPanel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-    auto *lowerRow = new QHBoxLayout(lowerRowPanel);
-    lowerRow->setContentsMargins(0, 0, 0, 0);
-    lowerRow->setSpacing(10);
-    lowerRow->addWidget(makePreview(tr("Offset"),
+                                    &m_diffView), 0, 2);
+    previews->addWidget(makePreview(tr("Offset"),
                                     ThermalView::PaletteMode::Grayscale,
-                                    &m_backgroundView), 1);
-    lowerRow->addWidget(makePreview(tr("Gain"),
+                                    &m_backgroundView), 1, 0);
+    previews->addWidget(makePreview(tr("Gain"),
                                     ThermalView::PaletteMode::Gain,
-                                    &m_gainView), 1);
+                                    &m_gainView), 1, 1);
     const PreviewPanelChrome qualityChrome = makePreviewPanel(tr("采集质量"));
     qualityChrome.panel->setMinimumSize(0, 0);
     qualityChrome.panel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-    m_quality = new QLabel(tr("等待生产标定数据"), qualityChrome.panel);
+    auto *qualityScroll = new QScrollArea(qualityChrome.panel);
+    qualityScroll->setObjectName(QStringLiteral("tn160ProductionQualityScroll"));
+    qualityScroll->setFrameShape(QFrame::NoFrame);
+    qualityScroll->setWidgetResizable(true);
+    qualityScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    qualityScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    qualityScroll->setMinimumSize(0, 0);
+    qualityScroll->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    auto *qualityContent = new QWidget(qualityScroll);
+    qualityContent->setMinimumSize(0, 0);
+    qualityContent->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    auto *qualityLayout = new QVBoxLayout(qualityContent);
+    qualityLayout->setContentsMargins(0, 0, 0, 0);
+    qualityLayout->setSpacing(6);
+    m_quality = new QLabel(tr("等待生产标定数据"), qualityContent);
     m_quality->setObjectName(QStringLiteral("tn160ProductionQuality"));
     m_quality->setWordWrap(true);
     m_quality->setMinimumSize(0, 0);
-    m_quality->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    m_quality->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_quality->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_quality->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-    qualityChrome.bodyLayout->addWidget(m_quality, 1);
-    lowerRow->addWidget(qualityChrome.panel, 1);
-    previews->addWidget(lowerRowPanel, 1);
+    m_ntcStatus = new QLabel(
+        tr("热模型：等待 A/B 采集"),
+        qualityContent);
+    m_ntcStatus->setObjectName(QStringLiteral("tn160ProductionNtcStatus"));
+    m_ntcStatus->setWordWrap(true);
+    m_ntcStatus->setMinimumSize(0, 0);
+    m_ntcStatus->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_ntcStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    qualityLayout->addWidget(m_quality);
+    qualityLayout->addWidget(m_ntcStatus);
+    qualityLayout->addStretch(1);
+    qualityScroll->setWidget(qualityContent);
+    qualityChrome.bodyLayout->addWidget(qualityScroll, 1);
+    previews->addWidget(qualityChrome.panel, 1, 2);
     m_lowView->setObjectName(QStringLiteral("tn160ProductionLowView"));
     m_highView->setObjectName(QStringLiteral("tn160ProductionHighView"));
     m_diffView->setObjectName(QStringLiteral("tn160ProductionDiffView"));
@@ -351,12 +383,18 @@ ProductionCalibrationPage::ProductionCalibrationPage(IHostServices *host,
             this, &ProductionCalibrationPage::requestProductRecalibration);
     connect(m_lowButton, &QPushButton::clicked, this, &ProductionCalibrationPage::captureLow);
     connect(m_highButton, &QPushButton::clicked, this, &ProductionCalibrationPage::captureHigh);
+    connect(m_highBButton, &QPushButton::clicked,
+            this, &ProductionCalibrationPage::captureHighB);
+    connect(m_offsetButton, &QPushButton::clicked,
+            this, &ProductionCalibrationPage::captureOffset);
     connect(m_importButton, &QPushButton::clicked, this, &ProductionCalibrationPage::importCalibration);
     connect(m_exportButton, &QPushButton::clicked, this, &ProductionCalibrationPage::exportCalibration);
     connect(m_restartButton, &QPushButton::clicked,
             this, &ProductionCalibrationPage::restartCurrentRun);
     connect(m_writeButton, &QPushButton::clicked,
-            this, &ProductionCalibrationPage::writeAndVerify);
+            this, &ProductionCalibrationPage::writeTestAndVerify);
+    connect(m_clearThermalModelButton, &QPushButton::clicked,
+            this, &ProductionCalibrationPage::clearThermalModel);
     connect(m_testWriteButton, &QPushButton::clicked,
             this, &ProductionCalibrationPage::writeTestAndVerify);
     connect(m_retryVerifyButton, &QPushButton::clicked,
@@ -375,14 +413,18 @@ ProductionCalibrationPage::ProductionCalibrationPage(IHostServices *host,
             this, [this](const bool success, const QVariantMap &result,
                          const QString &error) {
                 if (m_operation != Operation::Writing) return;
+                const bool baseV1Write = m_finalizationStage
+                    == FinalizationStage::WritingBaseV1;
                 if (!success) {
                     m_writeCommitAttempted = false;
                     m_writeAwaitingVerification = false;
                     m_timeout.stop();
-                    m_productAddressCommitted = true;
                     m_finalizationStage = FinalizationStage::None;
                     const QString message =
-                        tr("最终事务结果不确定：%1").arg(error);
+                        baseV1Write
+                            ? tr("基础V1写入失败：%1；原有效标定未主动擦除")
+                                  .arg(error)
+                            : tr("最终事务结果不确定：%1").arg(error);
                     failOperation(message);
                     emit finalizationFailed(this, message);
                     return;
@@ -392,11 +434,26 @@ ProductionCalibrationPage::ProductionCalibrationPage(IHostServices *host,
                     const quint32 result = value.toString().toUInt(&ok, 16);
                     return ok ? result : quint32(0);
                 };
-                completeNcmWrite(
-                    parseCrc(result.value(QStringLiteral("payload_crc32"))),
-                    parseCrc(result.value(QStringLiteral("package_header_crc32"))),
-                    parseCrc(result.value(QStringLiteral("flash_header_crc32"))));
+                const quint32 payloadCrc = parseCrc(
+                    result.value(QStringLiteral("payload_crc32")));
+                const quint32 headerCrc = parseCrc(
+                    result.value(QStringLiteral("package_header_crc32")));
+                const quint32 flashCrc = parseCrc(
+                    result.value(QStringLiteral("flash_header_crc32")));
+                if (baseV1Write) {
+                    completeBaseV1Write(payloadCrc, headerCrc, flashCrc);
+                } else {
+                    completeNcmWrite(payloadCrc, headerCrc, flashCrc);
+                }
             });
+    connect(&m_transport, &Tn160NcmTransport::thermalModelUploadFinished,
+            this, &ProductionCalibrationPage::handleThermalModelUpload);
+    connect(&m_transport, &Tn160NcmTransport::thermalModelClearFinished,
+            this, &ProductionCalibrationPage::handleThermalModelClear);
+    connect(&m_transport, &Tn160NcmTransport::thermalModelReadbackFinished,
+            this, &ProductionCalibrationPage::handleThermalModelReadback);
+    connect(&m_transport, &Tn160NcmTransport::thermalModelStateReady,
+            this, &ProductionCalibrationPage::handleThermalModelState);
     connect(&m_transport, &Tn160NcmTransport::networkSegmentChangeFinished,
             this, [this](const bool success, const int segment,
                          const QString &error) {
@@ -624,13 +681,14 @@ bool ProductionCalibrationPage::productAddressCommitted() const noexcept
 
 bool ProductionCalibrationPage::productionWriteAvailable() const noexcept
 {
-    return m_calibration.valid && m_low.complete && m_high.complete
-           && (!EnableRowRefProduction || m_calibration.rowRefModel.valid);
+    return false;
 }
 
 bool ProductionCalibrationPage::testWriteAvailable() const noexcept
 {
-    return m_calibration.valid;
+    return m_baseV1Established && m_calibration.writeVerified
+           && m_calibration.valid && m_highB.complete && m_offset.complete
+           && m_calibration.thermalModelValid;
 }
 
 double ProductionCalibrationPage::ntcCoverageC() const noexcept
@@ -665,6 +723,8 @@ void ProductionCalibrationPage::prepareForStation(
     m_productAddressCommitted = false;
     m_finalizationStage = FinalizationStage::None;
     m_verifyPhase = VerifyPhase::None;
+    m_thermalModelStage = ThermalModelStage::None;
+    m_thermalModelStateAttempts = 0;
     resetCalibrationRun();
     setPort(QStringLiteral("http://192.168.%1.1").arg(segment));
     setStatus(QStringLiteral("disconnected"), tr("等待设备"));
@@ -764,16 +824,16 @@ void ProductionCalibrationPage::grantFinalization()
     m_finalizationStage = FinalizationStage::SwitchingToProduct;
     m_timeout.start(60000);
     setStatus(QStringLiteral("connecting"),
-              tr("正在提交标定和最终地址"));
-    log(tr("一次提交标定与 192.168.17.1；设备只重启一次"));
-    m_transport.uploadCalibration(m_calibration.packet, true);
+              tr("正在切换最终地址"));
+    log(tr("基础V1与B残差均已回读；仅设置192.168.17.1"));
+    m_transport.setNetworkSegment(17);
     updateControls();
 }
 
 bool ProductionCalibrationPage::operationActive() const noexcept
 {
     return m_operation != Operation::Idle || m_verifyTransfer.isActive()
-        || m_saveActive;
+        || m_saveActive || m_thermalModelStage != ThermalModelStage::None;
 }
 
 bool ProductionCalibrationPage::connectionActive() const noexcept
@@ -822,11 +882,17 @@ void ProductionCalibrationPage::resetCalibrationRun()
     if (operationActive()) return;
     const bool hadRunData = !m_low.frames.isEmpty()
                             || !m_high.frames.isEmpty()
+                            || !m_highB.frames.isEmpty()
+                            || !m_offset.frames.isEmpty()
                             || !m_coldStartRecords.isEmpty()
                             || m_calibration.valid
                             || !m_sessionPath.isEmpty();
     m_low = {};
     m_high = {};
+    m_highB = {};
+    m_offset = {};
+    m_stateAReference = {};
+    m_stateBReady = false;
     m_coldStartRecords.clear();
     m_coldStartSamples.clear();
     m_coldStartPairRejected = 0;
@@ -855,14 +921,17 @@ void ProductionCalibrationPage::resetCalibrationRun()
     m_disconnectCleanupSerial.clear();
     m_writeCommitAttempted = false;
     m_writeAwaitingVerification = false;
+    m_baseV1Established = false;
+    m_thermalModelInstalled = false;
     m_sessionPath.clear();
     m_verifyPayloads.clear();
     m_verifyHeader.clear();
     m_verifyPhase = VerifyPhase::None;
+    m_thermalModelStage = ThermalModelStage::None;
+    m_thermalModelStateAttempts = 0;
+    m_thermalModelPendingError.clear();
     if (m_ntcStatus) {
-        m_ntcStatus->setText(
-            EnableRowRefProduction ? tr("RR参数：等待50°C采集")
-                                   : tr("温漂模式：通用补偿"));
+        m_ntcStatus->setText(tr("热模型：等待 A/B 采集"));
     }
     updatePreviews();
     if (hadRunData) {
@@ -895,6 +964,8 @@ void ProductionCalibrationPage::clearWriteAttemptState()
     m_verifyPhase = VerifyPhase::None;
     m_verifyHeader.clear();
     m_verifyPayloads.clear();
+    m_thermalModelStage = ThermalModelStage::None;
+    m_thermalModelStateAttempts = 0;
     m_writeHeader.clear();
     m_writePayloadCrc = 0;
     m_writeHeaderCrc = 0;
@@ -909,7 +980,13 @@ void ProductionCalibrationPage::invalidateDownstreamAfterCapture(
 {
     switch (kind) {
     case CaptureKind::Low:
+        m_baseV1Established = false;
+        m_thermalModelInstalled = false;
         m_high = {};
+        m_highB = {};
+        m_offset = {};
+        m_stateAReference = {};
+        m_stateBReady = false;
         m_calibration = {};
         if (m_ntcStatus) {
             m_ntcStatus->setText(
@@ -919,6 +996,12 @@ void ProductionCalibrationPage::invalidateDownstreamAfterCapture(
         clearWriteAttemptState();
         break;
     case CaptureKind::High:
+        m_baseV1Established = false;
+        m_thermalModelInstalled = false;
+        m_highB = {};
+        m_offset = {};
+        m_stateAReference = {};
+        m_stateBReady = false;
         m_calibration = {};
         if (m_ntcStatus) {
             m_ntcStatus->setText(
@@ -926,6 +1009,17 @@ void ProductionCalibrationPage::invalidateDownstreamAfterCapture(
                                        : tr("温漂模式：通用补偿"));
         }
         clearWriteAttemptState();
+        break;
+    case CaptureKind::HighB:
+        m_offset = {};
+        m_calibration.thermalModelPacket.clear();
+        m_calibration.thermalModelValid = false;
+        m_calibration.thermalModelWriteVerified = false;
+        break;
+    case CaptureKind::Offset:
+        m_calibration.thermalModelPacket.clear();
+        m_calibration.thermalModelValid = false;
+        m_calibration.thermalModelWriteVerified = false;
         break;
     case CaptureKind::None:
         break;
@@ -942,6 +1036,12 @@ void ProductionCalibrationPage::updateWorkflowAfterCapture(
     case CaptureKind::High:
         m_workflowState = QStringLiteral("calculating-a");
         break;
+    case CaptureKind::HighB:
+        m_workflowState = QStringLiteral("ready-b2");
+        break;
+    case CaptureKind::Offset:
+        m_workflowState = QStringLiteral("thermal-model-input-ready");
+        break;
     case CaptureKind::None:
         break;
     }
@@ -957,13 +1057,27 @@ void ProductionCalibrationPage::captureHigh()
     requestCapture(CaptureKind::High);
 }
 
+void ProductionCalibrationPage::captureHighB()
+{
+    requestCapture(CaptureKind::HighB);
+}
+
+void ProductionCalibrationPage::captureOffset()
+{
+    requestCapture(CaptureKind::Offset);
+}
+
 void ProductionCalibrationPage::requestCapture(const CaptureKind kind)
 {
     const ProductionWorkflowActions actions = actionAvailability();
     const bool allowed = kind == CaptureKind::Low
         ? actions.captureLow
         : kind == CaptureKind::High
-            ? actions.captureHigh : false;
+            ? actions.captureHigh
+        : kind == CaptureKind::HighB
+            ? actions.captureHighB
+        : kind == CaptureKind::Offset
+            ? actions.captureOffset : false;
     if (!allowed) {
         const QString reason = captureBlockedReason(kind);
         if (!reason.isEmpty()) {
@@ -989,6 +1103,16 @@ QString ProductionCalibrationPage::captureBlockedReason(
     }
     if (kind == CaptureKind::High && !m_low.complete) {
         return tr("请先完成 A1 0°C");
+    }
+    if ((kind == CaptureKind::HighB || kind == CaptureKind::Offset)
+        && !m_monitorContinuityValid) {
+        return tr("状态A/B期间发生RST或漏失FFC，请从第1步重新开始");
+    }
+    if (kind == CaptureKind::HighB && !m_stateBReady) {
+        return tr("请保持50°C，等待180秒且NTC变化至少32 ADU");
+    }
+    if (kind == CaptureKind::Offset && !m_highB.complete) {
+        return tr("请先完成状态B 50°C采集");
     }
     return tr("当前状态不允许执行该采集");
 }
@@ -1038,6 +1162,12 @@ void ProductionCalibrationPage::beginCapture(const CaptureKind kind)
     case CaptureKind::High:
         m_workflowState = QStringLiteral("capturing-a2");
         break;
+    case CaptureKind::HighB:
+        m_workflowState = QStringLiteral("capturing-b1");
+        break;
+    case CaptureKind::Offset:
+        m_workflowState = QStringLiteral("capturing-b2");
+        break;
     case CaptureKind::None:
         break;
     }
@@ -1064,7 +1194,9 @@ void ProductionCalibrationPage::beginCapture(const CaptureKind kind)
 void ProductionCalibrationPage::handleTransportState(const QString &state)
 {
     if (state == QStringLiteral("connected")) {
-        if (m_finalizationStage == FinalizationStage::ReconnectingTemporary
+        if (m_finalizationStage == FinalizationStage::ReconnectingBaseV1
+            || m_finalizationStage == FinalizationStage::AwaitingBaseV1Monitor
+            || m_finalizationStage == FinalizationStage::ReconnectingTemporary
             || m_finalizationStage == FinalizationStage::ReconnectingProduct
             || m_finalizationStage == FinalizationStage::AwaitingProductMonitor
             || m_finalizationStage == FinalizationStage::ValidatingProduct) {
@@ -1109,6 +1241,26 @@ void ProductionCalibrationPage::handleTransportState(const QString &state)
         }
         emit deviceIdentified(this, m_deviceSerial, connectedSegment);
         if (m_finalizationStage
+            == FinalizationStage::ReconnectingBaseV1) {
+            m_transport.close();
+            m_operation = Operation::Verifying;
+            m_verifyPhase = VerifyPhase::BaseV1;
+            m_finalizationStage = FinalizationStage::VerifyingBaseV1;
+            m_verifyHeader.clear();
+            m_verifyPayloads.clear();
+            setStatus(QStringLiteral("connecting"),
+                      tr("正在全量回读基础V1"));
+            const QString endpoint = m_portForVerify;
+            QTimer::singleShot(100, this, [this, endpoint] {
+                if (m_operation == Operation::Verifying
+                    && m_verifyPhase == VerifyPhase::BaseV1) {
+                    m_verifyTransfer.start(
+                        CalibrationTransfer::Mode::Dump, endpoint);
+                }
+            });
+            return;
+        }
+        if (m_finalizationStage
             == FinalizationStage::ReconnectingTemporary) {
             m_finalizationStage = FinalizationStage::SwitchingToProduct;
             setStatus(QStringLiteral("connecting"), tr("正在设置最终地址"));
@@ -1142,6 +1294,15 @@ void ProductionCalibrationPage::handleTransportState(const QString &state)
                         QStringLiteral("http://192.168.17.1"));
                 }
             });
+            return;
+        }
+        if (m_finalizationStage == FinalizationStage::AwaitingBaseV1Monitor) {
+            m_monitorFrameTimeout.start(NetworkTransitionTimeoutMs);
+            m_transport.write(QByteArray(1, char(MonitorCommand)));
+            setStatus(QStringLiteral("connecting"),
+                      tr("基础V1回读通过 · 确认均值保底"));
+            log(tr("等待新V1首帧和均值保底运行状态"));
+            updateControls();
             return;
         }
         if (m_finalizationStage
@@ -1210,7 +1371,11 @@ void ProductionCalibrationPage::handleTransportState(const QString &state)
         if (m_finalizationStage
                 == FinalizationStage::ReconnectingProduct
             || m_finalizationStage
-                   == FinalizationStage::VerifyingProduct) {
+                   == FinalizationStage::VerifyingProduct
+            || m_finalizationStage
+                   == FinalizationStage::ReconnectingBaseV1
+            || m_finalizationStage
+                   == FinalizationStage::VerifyingBaseV1) {
             return;
         }
         if (m_waitingCloseForVerify) {
@@ -1344,11 +1509,37 @@ void ProductionCalibrationPage::confirmMonitorConnection()
         }
         emit deviceConnected(this, m_deviceSerial, m_transport.networkSegment());
     }
+    if (m_finalizationStage == FinalizationStage::AwaitingBaseV1Monitor) {
+        if (m_recentTelemetry.isEmpty()) {
+            m_monitorFrameTimeout.start(NetworkTransitionTimeoutMs);
+            setStatus(QStringLiteral("connecting"),
+                      tr("基础V1首帧正常 · 等待诊断"));
+            return;
+        }
+        if (m_thermalModelStage == ThermalModelStage::None) {
+            m_thermalModelStage = ThermalModelStage::AwaitingBaseState;
+            m_transport.requestThermalModelState();
+        }
+        return;
+    }
     if (m_finalizationStage == FinalizationStage::AwaitingProductMonitor) {
         if (m_recentTelemetry.isEmpty()) {
             m_monitorFrameTimeout.start(NetworkTransitionTimeoutMs);
             setStatus(QStringLiteral("connecting"),
                       tr("最终首帧正常 · 等待新诊断"));
+            return;
+        }
+        if (m_calibration.testWrite
+            && m_calibration.thermalModelValid) {
+            if (m_thermalModelStage == ThermalModelStage::None) {
+                m_monitorFrameTimeout.stop();
+                m_thermalModelStage = ThermalModelStage::ReadingBack;
+                m_thermalModelStateAttempts = 0;
+                setStatus(QStringLiteral("connecting"),
+                          tr("最终地址在线 · 回读B逐机残差"));
+                log(tr("最终地址再次逐字节核对B逐机残差"));
+                m_transport.requestThermalModel();
+            }
             return;
         }
         const TelemetryState &latest = m_recentTelemetry.constLast();
@@ -1413,6 +1604,10 @@ void ProductionCalibrationPage::confirmMonitorConnection()
         beginPostWriteValidation(latest);
     } else if (firstMonitorFrame && m_operation == Operation::Idle
                && m_finalizationStage == FinalizationStage::None) {
+        if (m_thermalModelStage == ThermalModelStage::None) {
+            m_thermalModelStage = ThermalModelStage::Probing;
+            m_transport.requestThermalModelState();
+        }
         setStatus(QStringLiteral("connected"),
                   tr("设备已连接 · 可开始 0°C 标定"));
         log(EnableRowRefProduction
@@ -1568,6 +1763,15 @@ void ProductionCalibrationPage::handleMonitorSample(const SamplePacket &packet)
     }
     m_lastMonitorNucCount = state.nucCount;
     state.cumulativeNucDg = m_cumulativeNucDg;
+    if (m_stateAReference.valid && m_stateBReady
+        && !m_monitorContinuityValid) {
+        m_stateBReady = false;
+        m_workflowState = QStringLiteral("state-b-continuity-lost");
+        setStatus(QStringLiteral("error"),
+                  tr("状态A/B连续性失效 · 请重新开始"));
+        log(tr("状态B就绪状态已撤销：检测到RST或漏失FFC"),
+            QStringLiteral("error"));
+    }
     updateNtcCoverage(state);
     m_recentTelemetry.append(state);
     while (m_recentTelemetry.size() > 5) m_recentTelemetry.removeFirst();
@@ -1578,6 +1782,25 @@ void ProductionCalibrationPage::handleMonitorSample(const SamplePacket &packet)
                >= MonitorTraceIntervalUs) {
         m_monitorTrace.append(state);
         m_lastTraceTimestampUs = state.timestampUs;
+    }
+
+    if (m_stateAReference.valid && !m_stateBReady
+        && stateBReady(state)) {
+        m_stateBReady = true;
+        m_workflowState = QStringLiteral("ready-b1");
+        if (m_ntcStatus) {
+            m_ntcStatus->setText(
+                tr("热模型：状态B已就绪 · ΔNTC %1 ADU")
+                    .arg(std::abs(int(state.ntcAdu)
+                                  - int(m_stateAReference.ntcAdu))));
+        }
+        setStatus(QStringLiteral("connected"),
+                  tr("状态B已就绪 · 可执行第3步"));
+        log(tr("状态B已就绪：连续保持%1秒，ΔNTC=%2 ADU")
+                .arg(StateBHoldUs / 1000000)
+                .arg(std::abs(int(state.ntcAdu)
+                              - int(m_stateAReference.ntcAdu))));
+        updateControls();
     }
 
     if (m_operation == Operation::Capturing && m_captureRestoring) {
@@ -1885,6 +2108,22 @@ ProductionCalibrationPage::medianTelemetry(
     return result;
 }
 
+bool ProductionCalibrationPage::stateBReady(
+    const TelemetryState &state) const
+{
+    if (!m_stateAReference.valid || !state.valid
+        || !m_monitorContinuityValid
+        || state.timestampUs < m_stateAReference.timestampUs) {
+        return false;
+    }
+    const qint64 elapsedUs = state.timestampUs
+                             - m_stateAReference.timestampUs;
+    const int deltaNtc = std::abs(int(state.ntcAdu)
+                                  - int(m_stateAReference.ntcAdu));
+    return elapsedUs >= StateBHoldUs
+           && deltaNtc >= MinimumModelNtcSpanAdu;
+}
+
 void ProductionCalibrationPage::handleRawFrame(const QByteArray &frame,
                                                 const double mean,
                                                 const quint16 vtemp)
@@ -2080,6 +2319,18 @@ void ProductionCalibrationPage::finishCapture(const bool success,
         invalidateDownstreamAfterCapture(completedKind);
     }
 
+    if (finalSuccess && completedKind == CaptureKind::Offset) {
+        QString error;
+        if (!applySinglePointOffset(&error)) {
+            finalSuccess = false;
+            finalMessage = error;
+            m_calibration.thermalModelValid = false;
+            m_workflowState = QStringLiteral("ready-b2");
+        } else {
+            finalMessage += tr("；B逐机残差已自动计算，基础V1保持不变");
+        }
+    }
+
     if (finalSuccess) {
         updateWorkflowAfterCapture(completedKind);
     }
@@ -2134,6 +2385,22 @@ void ProductionCalibrationPage::finishCapture(const bool success,
                           tr("正在自动计算标定参数"));
                 QTimer::singleShot(
                     0, this, &ProductionCalibrationPage::computeTwoPoint);
+            } else if (completedKind == CaptureKind::HighB) {
+                setStatus(QStringLiteral("connected"),
+                          tr("状态B高温完成 · 请回到0°C"));
+                if (m_ntcStatus) {
+                    m_ntcStatus->setText(
+                        tr("热模型：状态B高温已采 · 等待0°C Offset"));
+                }
+                updateControls();
+            } else if (completedKind == CaptureKind::Offset) {
+                setStatus(QStringLiteral("connected"),
+                          tr("B逐机残差已计算 · 可执行第5步"));
+                if (m_ntcStatus) {
+                    m_ntcStatus->setText(
+                        tr("三层模型：V1+均值有效 · B残差待写入"));
+                }
+                updateControls();
             }
         });
 }
@@ -2149,6 +2416,8 @@ ProductionCalibrationPage::captureFor(const CaptureKind kind)
 {
     if (kind == CaptureKind::Low) return &m_low;
     if (kind == CaptureKind::High) return &m_high;
+    if (kind == CaptureKind::HighB) return &m_highB;
+    if (kind == CaptureKind::Offset) return &m_offset;
     return nullptr;
 }
 
@@ -2157,6 +2426,8 @@ ProductionCalibrationPage::captureFor(const CaptureKind kind) const
 {
     if (kind == CaptureKind::Low) return &m_low;
     if (kind == CaptureKind::High) return &m_high;
+    if (kind == CaptureKind::HighB) return &m_highB;
+    if (kind == CaptureKind::Offset) return &m_offset;
     return nullptr;
 }
 
@@ -2232,38 +2503,23 @@ void ProductionCalibrationPage::computeTwoPoint()
                     QStringLiteral("error"));
                 return;
             }
-            m_monitorContinuityValid = true;
-            m_lastMonitorNucCount = reference.nucCount;
-            m_lastGateUiSecond = -1;
-            log(tr("基础两点标定完成：mean_diff=%1 ADU，坏点=%2，模式=%3")
+            log(tr("基础V1已自动计算：mean_diff=%1 ADU，坏点=%2；"
+                   "写入前NTC=%3 ADU")
                     .arg(meanDiff, 0, 'f', 3)
                     .arg(badPointCount)
-                    .arg(!EnableRowRefProduction
-                             ? tr("通用基础V1")
-                             : rowRefModelValid
-                             ? tr("已自动生成，reference=%1")
-                                   .arg(m_calibration.rowRefModel.referenceAdu)
-                             : tr("50°C行参考无效，仅可写入基础V1测试件")));
-            m_ntcStatus->setText(
-                !EnableRowRefProduction
-                    ? tr("温漂模式：通用补偿")
-                    : rowRefModelValid
-                    ? tr("RR参数：reference %1 · K_Q8 256 · limit 600")
-                          .arg(m_calibration.rowRefModel.referenceAdu)
-                    : tr("RR参数：50°C行参考无效"));
-            setStatus(QStringLiteral("connected"),
-                      !EnableRowRefProduction
-                          ? tr("通用基础V1已计算 · 可写入")
-                      : rowRefModelValid
-                          ? tr("标定与RR温漂参数已计算 · 可写入")
-                          : tr("RR参考无效 · 仅可写入基础V1测试件"));
-            m_workflowState = !EnableRowRefProduction
-                ? QStringLiteral("base-v1-ready")
-                : rowRefModelValid
-                ? QStringLiteral("row-ref-model-ready")
-                : QStringLiteral("base-v1-ready");
+                    .arg(reference.ntcAdu));
+            Q_UNUSED(rowRefModelValid)
+            if (m_ntcStatus) {
+                m_ntcStatus->setText(
+                    tr("均值保底：等待基础V1写入并回读"));
+            }
+            setStatus(QStringLiteral("connecting"),
+                      tr("基础V1已计算 · 自动写入并回读"));
+            m_workflowState = QStringLiteral("writing-base-v1");
             updatePreviews();
             updateControls();
+            QTimer::singleShot(
+                0, this, &ProductionCalibrationPage::beginBaseV1Upload);
         });
 }
 
@@ -2730,6 +2986,142 @@ void ProductionCalibrationPage::finishPostWriteValidation(
         });
 }
 
+bool ProductionCalibrationPage::applySinglePointOffset(QString *error)
+{
+    if (!m_baseV1Established || !m_calibration.valid
+        || !m_highB.complete || !m_offset.complete
+        || m_highB.meanPixels.size() != PixelCount
+        || m_offset.meanPixels.size() != PixelCount
+        || !m_highB.after.valid || !m_offset.after.valid
+        || m_calibration.thermalModelState.isEmpty()) {
+        if (error) *error = tr("B逐机残差输入不完整");
+        return false;
+    }
+    if (!m_monitorContinuityValid) {
+        if (error) {
+            *error = tr("基础V1与B状态之间发生RST或遥测中断，请重新标定");
+        }
+        return false;
+    }
+    m_calibration.thermalModelPacket.clear();
+    m_calibration.thermalModelWriteVerified = false;
+    m_calibration.thermalModelValid = false;
+    return buildThermalModelPacket(error);
+}
+
+bool ProductionCalibrationPage::buildThermalModelPacket(QString *error)
+{
+    constexpr int MeanKQ8 = 290;
+    constexpr int MeanLimitAdu = 600;
+    if (!m_baseV1Established || m_writeHeader.size() != WriteHeaderBytes
+        || m_calibration.background.size() != ImageBytes
+        || m_calibration.gain.size() != GainBytes) {
+        if (error) *error = tr("B残差封包前置数据不完整");
+        return false;
+    }
+    const int baseNtc = m_calibration.thermalModelState
+        .value(QStringLiteral("base_ntc_adu")).toInt();
+    const quint32 calibrationId = crc32(m_writeHeader);
+    if (baseNtc <= 8 || baseNtc >= 4088 || calibrationId == 0
+        || m_calibration.thermalModelState
+               .value(QStringLiteral("mean_k_q8")).toInt() != MeanKQ8) {
+        if (error) *error = tr("基础V1或四台均值保底状态不一致");
+        return false;
+    }
+    const int learnedNtc = (int(m_highB.after.ntcAdu)
+                            + int(m_offset.after.ntcAdu) + 1) / 2;
+    const int ntcSpan = std::abs(learnedNtc - baseNtc);
+    if (ntcSpan < MinimumModelNtcSpanAdu) {
+        if (error) {
+            *error = tr("基础V1与状态B仅相差%1 ADU，小于%2 ADU")
+                         .arg(ntcSpan)
+                         .arg(MinimumModelNtcSpanAdu);
+        }
+        return false;
+    }
+
+    const auto correctedMean = [this](const CaptureData &capture) {
+        double sum = 0.0;
+        for (int pixel = 0; pixel < PixelCount; ++pixel) {
+            const double background = readLe16(
+                m_calibration.background,
+                pixel * qsizetype(sizeof(quint16)));
+            const double gain = readLeFloat(
+                m_calibration.gain, pixel * qsizetype(sizeof(float)));
+            sum += background
+                   + gain * (double(capture.meanPixels.at(pixel))
+                             - background);
+        }
+        return sum / PixelCount;
+    };
+    const double lowSignalB = correctedMean(m_offset)
+                              - double(m_offset.after.anchor);
+    const double highSignalB = correctedMean(m_highB)
+                               - double(m_highB.after.anchor);
+    const double responseB = highSignalB - lowSignalB;
+    if (!std::isfinite(lowSignalB) || !std::isfinite(responseB)
+        || responseB < MinimumMeanDiffAdu) {
+        if (error) *error = tr("状态B 0°C/50°C响应无效");
+        return false;
+    }
+    const auto roundQ8 = [](const int value) {
+        const qint64 numerator = qint64(value) * MeanKQ8;
+        return int(numerator >= 0
+                       ? (numerator + 128) / 256
+                       : -(((-numerator) + 128) / 256));
+    };
+    const int meanAnchor = std::clamp(
+        roundQ8(learnedNtc - baseNtc), -MeanLimitAdu, MeanLimitAdu);
+    const qint64 requiredAnchor = std::llround(lowSignalB);
+    const qint64 anchorResidual = requiredAnchor - meanAnchor;
+    const qint64 gainResidual = std::llround(
+        (responseB / double(m_calibration.meanDiff) - 1.0) * 65536.0);
+    if (std::abs(requiredAnchor) > ThermalModelAnchorLimitAdu
+        || std::abs(anchorResidual) > ThermalModelAnchorLimitAdu
+        || std::abs(gainResidual) > ThermalModelGainLimitQ16) {
+        if (error) {
+            *error = tr("B残差超出固件边界：总Anchor=%1，均值=%2，"
+                        "逐机Anchor=%3，Gain=%4")
+                         .arg(requiredAnchor).arg(meanAnchor)
+                         .arg(anchorResidual).arg(gainResidual);
+        }
+        return false;
+    }
+
+    QByteArray packet;
+    packet.reserve(ThermalModelBytes);
+    packet.append("T160DM2", 7);
+    packet.append(char(0));
+    appendLe16(packet, 2);
+    appendLe16(packet, ThermalModelBytes);
+    appendLe32(packet, calibrationId);
+    appendLe16(packet, quint16(baseNtc));
+    appendLe16(packet, quint16(learnedNtc));
+    appendLe16(packet, quint16(qint16(anchorResidual)));
+    appendLe16(packet, quint16(qint16(gainResidual)));
+    appendLe16(packet, 1);
+    appendLe16(packet, quint16(qint16(MeanKQ8)));
+    appendLe16(packet, MeanLimitAdu);
+    appendLe16(packet, ThermalModelAnchorLimitAdu);
+    packet.append(QByteArray(28, char(0)));
+    if (packet.size() != ThermalModelBytes - 4) {
+        if (error) *error = tr("热模型内部长度异常");
+        return false;
+    }
+    appendLe32(packet, crc32(packet));
+    m_calibration.thermalModelPacket = packet;
+    m_calibration.thermalModelValid = true;
+    log(tr("三层模型封包完成：calibration_id=%1，NTC %2→%3，"
+           "均值Anchor=%4，逐机Anchor=%5，Gain=%6 Q16")
+            .arg(calibrationId, 8, 16, QLatin1Char('0'))
+            .arg(baseNtc)
+            .arg(learnedNtc)
+            .arg(meanAnchor)
+            .arg(anchorResidual)
+            .arg(gainResidual));
+    return true;
+}
+
 void ProductionCalibrationPage::prepareWritePacket()
 {
     if (!m_calibration.valid
@@ -2803,6 +3195,443 @@ void ProductionCalibrationPage::prepareWritePacket()
     m_writeFlashHeaderCrc = 0;
 }
 
+void ProductionCalibrationPage::beginThermalModelUpload()
+{
+    if (m_calibration.thermalModelPacket.size() != ThermalModelBytes) {
+        handleThermalModelUpload(false, {}, tr("热模型封包长度异常"));
+        return;
+    }
+    m_thermalModelStage = ThermalModelStage::Uploading;
+    setStatus(QStringLiteral("connecting"), tr("正在写入热模型"));
+    m_transport.uploadThermalModel(m_calibration.thermalModelPacket);
+    updateControls();
+}
+
+void ProductionCalibrationPage::handleThermalModelUpload(
+    const bool success, const QVariantMap &result, const QString &error)
+{
+    if (m_thermalModelStage != ThermalModelStage::Uploading) return;
+    if (!success) {
+        m_thermalModelPendingError =
+            error.isEmpty() ? tr("设备拒绝热模型") : error;
+        m_thermalModelStage = ThermalModelStage::ReconcilingUploadPacket;
+        m_thermalModelStateAttempts = 0;
+        setStatus(QStringLiteral("connecting"),
+                  tr("B写入结果不确定 · 正在核对模型内容"));
+        m_transport.requestThermalModel();
+        return;
+    }
+    const quint32 expectedId = readLe32(
+        m_calibration.thermalModelPacket, 12);
+    const quint32 reportedId = result.value(
+        QStringLiteral("calibration_id")).toUInt();
+    bool crcOk = false;
+    const quint32 reportedCrc = result.value(
+        QStringLiteral("packet_crc32")).toString().toUInt(&crcOk, 16);
+    const quint32 expectedCrc = readLe32(
+        m_calibration.thermalModelPacket, ThermalModelBytes - 4);
+    if (reportedId != expectedId || !crcOk || reportedCrc != expectedCrc) {
+        m_thermalModelPendingError = tr("热模型写入回复与发送包不一致");
+        m_thermalModelStage = ThermalModelStage::ReconcilingUploadPacket;
+        m_thermalModelStateAttempts = 0;
+        setStatus(QStringLiteral("connecting"),
+                  tr("B写入结果不确定 · 正在核对模型内容"));
+        m_transport.requestThermalModel();
+        return;
+    }
+    m_thermalModelStage = ThermalModelStage::ReadingBack;
+    setStatus(QStringLiteral("connecting"), tr("热模型已写入 · 正在回读"));
+    m_transport.requestThermalModel();
+}
+
+void ProductionCalibrationPage::handleThermalModelClear(
+    const bool success, const QVariantMap &result, const QString &error)
+{
+    Q_UNUSED(result)
+    if (m_thermalModelStage != ThermalModelStage::Clearing) return;
+    if (!success) {
+        m_thermalModelStage = ThermalModelStage::None;
+        m_timeout.stop();
+        const QString message = error.isEmpty()
+            ? tr("设备拒绝清除B补偿") : error;
+        setStatus(QStringLiteral("error"), tr("清除B补偿失败"));
+        log(message, QStringLiteral("error"));
+        updateControls();
+        emitWorkflowState();
+        return;
+    }
+    m_thermalModelStage = ThermalModelStage::ReconcilingClear;
+    m_thermalModelStateAttempts = 0;
+    setStatus(QStringLiteral("connecting"),
+              tr("B补偿已提交 · 正在确认均值保底"));
+    m_transport.requestThermalModelState();
+}
+
+void ProductionCalibrationPage::handleThermalModelReadback(
+    const bool success, const QByteArray &packet, const QString &error)
+{
+    if (m_thermalModelStage == ThermalModelStage::ReconcilingUploadPacket) {
+        if (success && packet == m_calibration.thermalModelPacket) {
+            m_thermalModelStage = ThermalModelStage::VerifyingState;
+            m_thermalModelStateAttempts = 0;
+            setStatus(QStringLiteral("connecting"),
+                      tr("B模型内容已在设备中 · 正在确认运行状态"));
+            m_transport.requestThermalModelState();
+        } else {
+            m_thermalModelStage = ThermalModelStage::ReconcilingUploadFailure;
+            m_thermalModelStateAttempts = 0;
+            setStatus(QStringLiteral("connecting"),
+                      tr("B模型未确认 · 正在核对保底状态"));
+            m_transport.requestThermalModelState();
+        }
+        return;
+    }
+    if (m_thermalModelStage != ThermalModelStage::ReadingBack) return;
+    if (!success || packet != m_calibration.thermalModelPacket) {
+        const QString message = !error.isEmpty()
+            ? error : tr("热模型回读内容与写入包不一致");
+        m_thermalModelPendingError = message;
+        m_thermalModelStage = ThermalModelStage::ReconcilingUploadFailure;
+        m_thermalModelStateAttempts = 0;
+        setStatus(QStringLiteral("connecting"),
+                  tr("B回读结果不确定 · 正在核对当前模型"));
+        m_transport.requestThermalModelState();
+        return;
+    }
+    m_thermalModelStage = ThermalModelStage::VerifyingState;
+    m_thermalModelStateAttempts = 0;
+    setStatus(QStringLiteral("connecting"), tr("热模型回读一致 · 验证运行状态"));
+    QTimer::singleShot(250, this, [this] {
+        if (m_thermalModelStage == ThermalModelStage::VerifyingState) {
+            m_transport.requestThermalModelState();
+        }
+    });
+}
+
+void ProductionCalibrationPage::handleThermalModelState(
+    const bool success, const QVariantMap &state, const QString &error)
+{
+    if (m_thermalModelStage != ThermalModelStage::AwaitingBaseState
+        && m_thermalModelStage != ThermalModelStage::VerifyingState
+        && m_thermalModelStage != ThermalModelStage::Probing
+        && m_thermalModelStage != ThermalModelStage::ReconcilingUploadFailure
+        && m_thermalModelStage != ThermalModelStage::ReconcilingClear) {
+        return;
+    }
+    const auto reject = [this](const QString &message) {
+        const bool baseV1Failure = m_finalizationStage
+            == FinalizationStage::AwaitingBaseV1Monitor;
+        const bool mustRemove = !baseV1Failure && !m_singleDeviceMode
+            && m_productAddressCommitted;
+        m_thermalModelStage = ThermalModelStage::None;
+        m_calibration.thermalModelWriteVerified = false;
+        m_writeAwaitingVerification = mustRemove;
+        m_workflowState = QStringLiteral("verification-failed");
+        m_finalizationStage = mustRemove
+            ? FinalizationStage::AwaitingRemoval : FinalizationStage::None;
+        setStatus(QStringLiteral("error"),
+                  mustRemove ? tr("三层模型验证失败 · 请拔出")
+                             : baseV1Failure
+                                 ? tr("均值保底验证失败")
+                                 : tr("B残差验证失败 · V1+均值仍有效"));
+        log(message, QStringLiteral("error"));
+        emit finalizationFailed(this, message);
+        updateControls();
+        emitWorkflowState();
+    };
+    if (!success) {
+        if (m_thermalModelStage == ThermalModelStage::Probing) {
+            m_thermalModelStage = ThermalModelStage::None;
+            log(error.isEmpty() ? tr("读取当前B补偿状态失败，继续使用V1/均值保底")
+                                : tr("读取当前B补偿状态失败：%1").arg(error),
+                QStringLiteral("warning"));
+            updateControls();
+            emitWorkflowState();
+            return;
+        }
+        if ((m_thermalModelStage == ThermalModelStage::ReconcilingUploadFailure
+             || m_thermalModelStage == ThermalModelStage::ReconcilingClear)
+            && m_thermalModelStateAttempts < 20) {
+            ++m_thermalModelStateAttempts;
+            QTimer::singleShot(250, this, [this] {
+                if (m_thermalModelStage
+                        == ThermalModelStage::ReconcilingUploadFailure
+                    || m_thermalModelStage
+                           == ThermalModelStage::ReconcilingClear) {
+                    m_transport.requestThermalModelState();
+                }
+            });
+            return;
+        }
+        const QString fallback =
+            m_thermalModelPendingError.isEmpty()
+                ? (error.isEmpty() ? tr("无法读取热模型状态") : error)
+                : m_thermalModelPendingError;
+        reject(fallback);
+        return;
+    }
+
+    if (m_thermalModelStage == ThermalModelStage::Probing) {
+        const bool valid = state.value(QStringLiteral("valid")).toBool();
+        const bool perDevice =
+            state.value(QStringLiteral("per_device")).toBool();
+        m_thermalModelInstalled = valid && perDevice;
+        m_calibration.thermalModelState = state;
+        m_thermalModelStage = ThermalModelStage::None;
+        updateControls();
+        emitWorkflowState();
+        return;
+    }
+
+    if (m_thermalModelStage == ThermalModelStage::ReconcilingClear) {
+        const bool valid = state.value(QStringLiteral("valid")).toBool();
+        const bool perDevice =
+            state.value(QStringLiteral("per_device")).toBool();
+        const bool active = state.value(QStringLiteral("active")).toBool();
+        const bool meanActive =
+            state.value(QStringLiteral("mean_active")).toBool();
+        if (perDevice) {
+            reject(tr("清除B补偿后设备仍报告逐机模型"));
+            return;
+        }
+        if ((!active || !meanActive) && m_thermalModelStateAttempts < 20) {
+            ++m_thermalModelStateAttempts;
+            QTimer::singleShot(250, this, [this] {
+                if (m_thermalModelStage == ThermalModelStage::ReconcilingClear) {
+                    m_transport.requestThermalModelState();
+                }
+            });
+            return;
+        }
+        if (valid || !active || !meanActive) {
+            reject(tr("B补偿已清除，但均值保底状态未确认"));
+            return;
+        }
+        m_thermalModelStage = ThermalModelStage::None;
+        m_timeout.stop();
+        m_thermalModelInstalled = false;
+        m_calibration.thermalModelPacket.clear();
+        m_calibration.thermalModelValid = false;
+        m_calibration.thermalModelWriteVerified = false;
+        m_calibration.thermalModelState = state;
+        m_writeAwaitingVerification = false;
+        m_workflowState = QStringLiteral("mean-fallback-active");
+        if (m_ntcStatus) {
+            m_ntcStatus->setText(
+                tr("B补偿已清除 · V1+四台均值保底运行"));
+        }
+        setStatus(QStringLiteral("connected"),
+                  tr("B补偿已清除 · 均值保底已确认"));
+        log(tr("清除B补偿完成：active=1，mean_active=1，per_device=0"));
+        updatePreviews();
+        updateControls();
+        emitWorkflowState();
+        if (!m_sessionPath.isEmpty()) savePackageAsync(m_sessionPath, {}, {});
+        return;
+    }
+
+    if (m_thermalModelStage == ThermalModelStage::ReconcilingUploadFailure) {
+        const bool valid = state.value(QStringLiteral("valid")).toBool();
+        const bool active = state.value(QStringLiteral("active")).toBool();
+        const bool meanActive =
+            state.value(QStringLiteral("mean_active")).toBool();
+        const bool perDevice =
+            state.value(QStringLiteral("per_device")).toBool();
+        if ((!active || !meanActive) && m_thermalModelStateAttempts < 20) {
+            ++m_thermalModelStateAttempts;
+            QTimer::singleShot(250, this, [this] {
+                if (m_thermalModelStage
+                    == ThermalModelStage::ReconcilingUploadFailure) {
+                    m_transport.requestThermalModelState();
+                }
+            });
+            return;
+        }
+        const bool mustRemove = !m_singleDeviceMode
+            && m_productAddressCommitted;
+        m_thermalModelStage = ThermalModelStage::None;
+        m_timeout.stop();
+        m_thermalModelInstalled = valid && perDevice;
+        m_calibration.thermalModelWriteVerified = false;
+        m_calibration.thermalModelState = state;
+        m_writeAwaitingVerification = mustRemove;
+        m_workflowState = QStringLiteral("verification-failed");
+        m_finalizationStage = mustRemove
+            ? FinalizationStage::AwaitingRemoval : FinalizationStage::None;
+        const QString detail = m_thermalModelPendingError.isEmpty()
+            ? tr("B模型写入结果不确定") : m_thermalModelPendingError;
+        const QString stateText = perDevice
+            ? tr("；旧B补偿仍在运行，可清除B补偿")
+            : tr("；V1+均值保底仍在运行");
+        setStatus(QStringLiteral("error"),
+                  mustRemove ? tr("B写入失败 · 请拔出")
+                             : tr("B写入失败 · 可清除或保留保底"));
+        log(detail + stateText, QStringLiteral("error"));
+        emit finalizationFailed(this, detail + stateText);
+        updateControls();
+        emitWorkflowState();
+        return;
+    }
+
+    if (m_thermalModelStage == ThermalModelStage::AwaitingBaseState
+        && m_finalizationStage
+               == FinalizationStage::AwaitingBaseV1Monitor) {
+        const bool active = state.value(QStringLiteral("active")).toBool();
+        const bool meanActive =
+            state.value(QStringLiteral("mean_active")).toBool();
+        const bool perDevice =
+            state.value(QStringLiteral("per_device")).toBool();
+        const int baseNtc =
+            state.value(QStringLiteral("base_ntc_adu")).toInt();
+        const int meanKQ8 = state.value(QStringLiteral("mean_k_q8")).toInt();
+        if (!active || !meanActive || perDevice
+            || baseNtc <= 8 || baseNtc >= 4088 || meanKQ8 != 290) {
+            reject(tr("基础V1已回读，但均值保底未正确激活："
+                      "active=%1 mean=%2 per_device=%3 base=%4 K_Q8=%5")
+                       .arg(active).arg(meanActive).arg(perDevice)
+                       .arg(baseNtc).arg(meanKQ8));
+            return;
+        }
+        m_calibration.thermalModelState = state;
+        const TelemetryState reference = medianTelemetry(m_recentTelemetry);
+        if (!reference.valid) {
+            reject(tr("均值保底已激活，但缺少有效状态B计时参考"));
+            return;
+        }
+        m_thermalModelStage = ThermalModelStage::None;
+        m_finalizationStage = FinalizationStage::None;
+        m_baseV1Established = true;
+        m_thermalModelInstalled = false;
+        m_writeAwaitingVerification = false;
+        m_monitorFrameTimeout.stop();
+        m_stateAReference = reference;
+        m_stateBReady = false;
+        m_monitorContinuityValid = true;
+        m_lastMonitorNucCount = reference.nucCount;
+        m_lastGateUiSecond = -1;
+        m_workflowState = QStringLiteral("waiting-state-b");
+        if (m_ntcStatus) {
+            m_ntcStatus->setText(
+                tr("均值保底已启用 · K_Q8 290 · 保持50°C至少180秒"));
+        }
+        setStatus(QStringLiteral("connected"),
+                  tr("基础V1与均值保底已生效 · 等待状态B"));
+        log(tr("基础V1回读及均值保底确认通过：base NTC=%1，K_Q8=290")
+                .arg(baseNtc));
+        updateControls();
+        emitWorkflowState();
+        return;
+    }
+    if (m_thermalModelStage == ThermalModelStage::AwaitingBaseState) {
+        reject(tr("热模型状态机与基础V1阶段不一致"));
+        return;
+    }
+
+    const bool valid = state.value(QStringLiteral("valid")).toBool();
+    const bool active = state.value(QStringLiteral("active")).toBool();
+    const bool meanActive =
+        state.value(QStringLiteral("mean_active")).toBool();
+    const bool perDevice = state.value(QStringLiteral("per_device")).toBool();
+    if (valid && perDevice && !active && m_thermalModelStateAttempts < 20) {
+        ++m_thermalModelStateAttempts;
+        QTimer::singleShot(250, this, [this] {
+            if (m_thermalModelStage == ThermalModelStage::VerifyingState) {
+                m_transport.requestThermalModelState();
+            }
+        });
+        return;
+    }
+    const int baseNtc = state.value(QStringLiteral("base_ntc_adu")).toInt();
+    const int minimumNtc = state.value(QStringLiteral("ntc_min_adu")).toInt();
+    const int maximumNtc = state.value(QStringLiteral("ntc_max_adu")).toInt();
+    const int anchor = state.value(QStringLiteral("anchor_comp_adu")).toInt();
+    const int gain = state.value(QStringLiteral("gain_delta_q16")).toInt();
+    const int gainScale = state.value(QStringLiteral("gain_scale_q16")).toInt();
+    const int expectedBase = readLe16(m_calibration.thermalModelPacket, 16);
+    const int expectedLearned = readLe16(
+        m_calibration.thermalModelPacket, 18);
+    const int expectedMinimum = std::min(expectedBase, expectedLearned);
+    const int expectedMaximum = std::max(expectedBase, expectedLearned);
+    if (!valid || !active || !meanActive || !perDevice
+        || state.value(QStringLiteral("mean_k_q8")).toInt() != 290
+        || baseNtc != expectedBase
+        || minimumNtc != expectedMinimum || maximumNtc != expectedMaximum
+        || std::abs(anchor) > ThermalModelAnchorLimitAdu
+        || std::abs(gain) > ThermalModelGainLimitQ16
+        || gainScale < 65536 - ThermalModelGainLimitQ16
+        || gainScale > 65536 + ThermalModelGainLimitQ16) {
+        reject(tr("热模型运行状态不满足约束：valid=%1 active=%2 mean=%3 per_device=%4 "
+                  "base=%5 range=%6..%7 anchor=%8 gain=%9")
+                   .arg(valid).arg(active).arg(meanActive).arg(perDevice)
+                   .arg(baseNtc).arg(minimumNtc).arg(maximumNtc)
+                   .arg(anchor).arg(gain));
+        return;
+    }
+
+    const bool finalAddressVerification = m_finalizationStage
+        == FinalizationStage::AwaitingProductMonitor;
+    m_thermalModelStage = ThermalModelStage::None;
+    m_timeout.stop();
+    m_thermalModelInstalled = true;
+    m_calibration.thermalModelWriteVerified = true;
+    m_calibration.thermalModelState = state;
+    m_workflowState = finalAddressVerification || m_singleDeviceMode
+        ? QStringLiteral("test-completed")
+        : QStringLiteral("residual-verified");
+    setStatus(QStringLiteral("connecting"), tr("保存热模型回读记录"));
+    savePackageAsync(
+        m_sessionPath, {},
+        [this, finalAddressVerification](const bool saved,
+                                        const QString &saveError) {
+            if (!saved) {
+                m_calibration.thermalModelWriteVerified = false;
+                m_writeAwaitingVerification = true;
+                m_workflowState = QStringLiteral("verification-failed");
+                m_finalizationStage = m_singleDeviceMode
+                    ? FinalizationStage::None
+                    : FinalizationStage::AwaitingRemoval;
+                setStatus(QStringLiteral("error"),
+                          m_singleDeviceMode
+                              ? tr("热模型记录保存失败")
+                              : tr("热模型记录保存失败 · 请拔出"));
+                log(tr("热模型已回读，但生产记录保存失败：%1")
+                        .arg(saveError),
+                    QStringLiteral("error"));
+                emit finalizationFailed(this, saveError);
+                updateControls();
+                emitWorkflowState();
+                return;
+            }
+            m_writeAwaitingVerification = false;
+            if (m_singleDeviceMode) {
+                m_finalizationStage = FinalizationStage::None;
+                setStatus(QStringLiteral("connected"),
+                          tr("热模型测试件写入并验证完成"));
+                emit calibrationCompleted(m_deviceSerial, false,
+                                          m_sessionPath);
+            } else if (finalAddressVerification) {
+                m_finalizationStage = FinalizationStage::AwaitingRemoval;
+                setStatus(QStringLiteral("connected"),
+                          tr("热模型测试件完成 · 请拔出"));
+                emit finalizationFailed(
+                    this, tr("首版热模型仅作测试件，不标记量产PASS"));
+            } else {
+                m_finalizationStage = FinalizationStage::WaitingGrant;
+                setStatus(QStringLiteral("connecting"),
+                          tr("B逐机残差已回读 · 等待最终地址"));
+                log(tr("临时工位模型回读通过；等待192.168.17.1独占权"));
+                emit finalizationRequested(this);
+                updateControls();
+                emitWorkflowState();
+                return;
+            }
+            log(tr("TEST PASS：基础V1与64字节热模型逐字节回读一致；"
+                   "首版模型不标记量产PASS"));
+            updateControls();
+            emitWorkflowState();
+        });
+}
+
 void ProductionCalibrationPage::writeAndVerify()
 {
     beginWriteAndVerify(false);
@@ -2811,6 +3640,24 @@ void ProductionCalibrationPage::writeAndVerify()
 void ProductionCalibrationPage::writeTestAndVerify()
 {
     beginWriteAndVerify(true);
+}
+
+void ProductionCalibrationPage::clearThermalModel()
+{
+    const ProductionWorkflowActions actions = actionAvailability();
+    if (!actions.clearThermalModel || operationActive()) return;
+    if (!m_transport.isActive()) {
+        failOperation(tr("请先连接 TN160"));
+        return;
+    }
+    m_thermalModelPendingError.clear();
+    m_thermalModelStateAttempts = 0;
+    m_thermalModelStage = ThermalModelStage::Clearing;
+    setStatus(QStringLiteral("connecting"), tr("正在清除B逐机补偿"));
+    log(tr("提交清除B补偿事务；基础V1和四台均值保底保持不变"));
+    m_transport.clearThermalModel();
+    updateControls();
+    emitWorkflowState();
 }
 
 void ProductionCalibrationPage::retryWriteVerification()
@@ -2841,6 +3688,67 @@ void ProductionCalibrationPage::retryWriteVerification()
     updateControls();
 }
 
+void ProductionCalibrationPage::beginBaseV1Upload()
+{
+    if (m_shuttingDown || operationActive() || m_baseV1Established) return;
+    if (!m_transport.isActive()) {
+        failOperation(tr("基础V1写入前USB NCM已断开"));
+        return;
+    }
+    prepareWritePacket();
+    if (m_writeHeader.size() != WriteHeaderBytes
+        || m_calibration.packet.size()
+               != WriteHeaderBytes + ImageBytes + GainBytes + BadPointBytes) {
+        failOperation(tr("基础V1标定包长度异常"));
+        return;
+    }
+    m_operation = Operation::Writing;
+    m_writeCommitAttempted = true;
+    m_writeAwaitingVerification = false;
+    m_portForVerify = m_endpoint;
+    m_finalizationStage = FinalizationStage::WritingBaseV1;
+    m_timeout.start(60000);
+    m_workflowState = QStringLiteral("writing-base-v1");
+    setStatus(QStringLiteral("connecting"),
+              tr("正在写入基础V1 · 保持50°C"));
+    log(tr("基础V1写入当前工位；不修改最终地址"));
+    m_transport.uploadCalibration(m_calibration.packet, false);
+    updateControls();
+}
+
+void ProductionCalibrationPage::completeBaseV1Write(
+    const quint32 payloadCrc, const quint32 headerCrc,
+    const quint32 flashHeaderCrc)
+{
+    if (payloadCrc != m_writePayloadCrc || headerCrc != m_writeHeaderCrc
+        || flashHeaderCrc == 0u) {
+        m_finalizationStage = FinalizationStage::None;
+        const QString message = tr("基础V1写入回复CRC不一致");
+        failOperation(message);
+        emit finalizationFailed(this, message);
+        return;
+    }
+    m_timeout.stop();
+    m_writeFlashHeaderCrc = flashHeaderCrc;
+    m_writeAwaitingVerification = true;
+    m_operation = Operation::Idle;
+    m_finalizationStage = FinalizationStage::ReconnectingBaseV1;
+    setStatus(QStringLiteral("connecting"),
+              tr("基础V1已提交 · 等待原工位重连"));
+    log(tr("基础V1设备内校验通过；等待重启后全量回读"));
+    const QString endpoint = m_portForVerify;
+    m_transport.close();
+    QTimer::singleShot(2500, this, [this, endpoint] {
+        if (!m_shuttingDown
+            && m_finalizationStage
+                   == FinalizationStage::ReconnectingBaseV1) {
+            m_transport.openWhenAvailable(endpoint,
+                                          NetworkTransitionTimeoutMs);
+        }
+    });
+    updateControls();
+}
+
 void ProductionCalibrationPage::beginWriteAndVerify(const bool testWrite)
 {
     if (operationActive()) return;
@@ -2855,16 +3763,14 @@ void ProductionCalibrationPage::beginWriteAndVerify(const bool testWrite)
         failOperation(tr("请先连接 TN160"));
         return;
     }
-    if (!m_calibration.valid) {
-        failOperation(tr("没有可写入的标定数据"));
+    if (!m_baseV1Established || !m_calibration.writeVerified) {
+        failOperation(tr("基础V1尚未写入并完成回读"));
         return;
     }
     m_calibration.testWrite = testWrite;
-    prepareWritePacket();
-    if (m_writeHeader.size() != WriteHeaderBytes
-        || m_calibration.packet.size()
-               != WriteHeaderBytes + ImageBytes + GainBytes + BadPointBytes) {
-        failOperation(tr("内部 V1 标定包长度异常"));
+    if (m_calibration.thermalModelPacket.size() != ThermalModelBytes
+        || !m_calibration.thermalModelValid) {
+        failOperation(tr("没有可写入的B逐机残差"));
         return;
     }
     QString error;
@@ -2872,10 +3778,10 @@ void ProductionCalibrationPage::beginWriteAndVerify(const bool testWrite)
         failOperation(tr("写入前创建生产记录失败：%1").arg(error));
         return;
     }
-    /* computeTwoPoint() already persists the complete package before it marks
-     * the result writable.  Do not write the same large raw capture set again
-     * on the operator's click; the verified post-reboot archive remains. */
-    beginWriteUpload();
+    m_calibration.thermalModelWriteVerified = false;
+    m_workflowState = QStringLiteral("writing-device-residual");
+    log(tr("第5步：仅写入B逐机残差；基础V1和均值保底保持不变"));
+    beginThermalModelUpload();
 }
 
 void ProductionCalibrationPage::beginWriteUpload()
@@ -2898,12 +3804,12 @@ void ProductionCalibrationPage::beginWriteUpload()
         m_workflowState = QStringLiteral("writing-calibration");
         setStatus(QStringLiteral("connecting"),
                   baseV1Only
-                      ? tr("正在写入通用基础V1并等待重启")
+                      ? tr("正在写入基础V1 · 重启后自动续写热模型")
                   : m_calibration.testWrite
                       ? tr("正在写入RR测试件并等待重启")
                       : tr("正在写入带RR温漂补偿的标定并等待重启"));
         log(baseV1Only
-                ? tr("写入通用基础V1：模型扩展区清零")
+                ? tr("第5步：先写基础V1；重启回读后自动写入独立热模型")
                 : m_calibration.testWrite
                     ? tr("显式写入RR测试件；固定地址保持192.168.17.1")
                     : tr("RR参数已计算；写入标定，固定地址保持192.168.17.1"));
@@ -2915,7 +3821,7 @@ void ProductionCalibrationPage::beginWriteUpload()
     m_finalizationStage = FinalizationStage::WaitingGrant;
     setStatus(QStringLiteral("connecting"),
               tr("等待 192.168.17.1 独占权"));
-    log(tr("第 3 步完成，等待最终地址空闲后自动提交"));
+    log(tr("第5步已开始，等待最终地址空闲后自动提交"));
     emit finalizationRequested(this);
     updateControls();
 }
@@ -2993,6 +3899,24 @@ void ProductionCalibrationPage::verifyCompleted(const bool success,
                 verified = false;
                 result += tr("；保存验证记录失败：%1").arg(saveError);
             }
+            if (verified && phase == VerifyPhase::BaseV1) {
+                m_lastMonitorNucCount = -1;
+                m_cumulativeNucDg = 0;
+                m_monitorContinuityValid = true;
+                m_recentTelemetry.clear();
+                m_telemetryHistory.clear();
+                m_lastTraceTimestampUs = 0;
+                m_finalizationStage =
+                    FinalizationStage::AwaitingBaseV1Monitor;
+                setStatus(QStringLiteral("connecting"),
+                          tr("基础V1全量回读通过 · 确认均值保底"));
+                log(tr("基础V1 header与三段payload一致；正在确认K_Q8=290"));
+                m_transport.openWhenAvailable(m_portForVerify,
+                                              NetworkTransitionTimeoutMs);
+                updatePreviews();
+                updateControls();
+                return;
+            }
             if (verified && phase == VerifyPhase::TemporaryAddress) {
                 m_finalizationStage = FinalizationStage::WaitingGrant;
                 setStatus(QStringLiteral("connecting"),
@@ -3043,6 +3967,12 @@ void ProductionCalibrationPage::handleTransportError(const QString &message)
     if ((m_finalizationStage == FinalizationStage::AwaitingProductMonitor
          || m_finalizationStage == FinalizationStage::ValidatingProduct)
         && m_productAddressCommitted) {
+        const bool thermalModelPending =
+            m_calibration.thermalModelValid
+            && !m_calibration.thermalModelWriteVerified;
+        m_thermalModelStage = ThermalModelStage::None;
+        m_thermalModelStateAttempts = 0;
+        if (thermalModelPending) m_writeAwaitingVerification = true;
         if (m_singleDeviceMode) {
             m_monitorFrameTimeout.stop();
             m_finalizationStage = FinalizationStage::None;
@@ -3075,7 +4005,11 @@ void ProductionCalibrationPage::handleTransportError(const QString &message)
         return;
     }
     const bool finalizing =
-        m_finalizationStage == FinalizationStage::ReconnectingTemporary
+        m_finalizationStage == FinalizationStage::WritingBaseV1
+        || m_finalizationStage == FinalizationStage::ReconnectingBaseV1
+        || m_finalizationStage == FinalizationStage::VerifyingBaseV1
+        || m_finalizationStage == FinalizationStage::AwaitingBaseV1Monitor
+        || m_finalizationStage == FinalizationStage::ReconnectingTemporary
         || m_finalizationStage == FinalizationStage::SwitchingToProduct
         || m_finalizationStage == FinalizationStage::ReconnectingProduct
         || m_finalizationStage == FinalizationStage::VerifyingProduct
@@ -3395,11 +4329,15 @@ ProductionCalibrationPage::archiveSnapshot() const
     snapshot.bootselRoot = m_bootselRoot;
     snapshot.low = m_low;
     snapshot.high = m_high;
+    snapshot.highB = m_highB;
+    snapshot.offset = m_offset;
     snapshot.coldStartSamples = m_coldStartSamples;
     snapshot.coldStartPairRejected = m_coldStartPairRejected;
     snapshot.monitorTrace = m_monitorTrace;
     snapshot.monitorContinuityValid = m_monitorContinuityValid;
     snapshot.connectionReference = m_connectionReference;
+    snapshot.stateAReference = m_stateAReference;
+    snapshot.stateBReady = m_stateBReady;
     snapshot.ntcMinimumC = m_ntcMinimumC;
     snapshot.ntcMaximumC = m_ntcMaximumC;
     snapshot.ntcMinimumAdu = m_ntcMinimumAdu;
@@ -3417,7 +4355,11 @@ ProductionCalibrationPage::failedCaptures() const
     if (m_sessionPath.isEmpty() || m_currentCapture.frames.isEmpty()) return {};
     const QString phase = m_captureKind == CaptureKind::Low
         ? QStringLiteral("low")
-        : QStringLiteral("high");
+        : m_captureKind == CaptureKind::High
+            ? QStringLiteral("high")
+        : m_captureKind == CaptureKind::HighB
+            ? QStringLiteral("high_b")
+            : QStringLiteral("offset");
     const QString prefix = QStringLiteral("%1_failed_%2")
                                .arg(phase, QDateTime::currentDateTime().toString(
                                                QStringLiteral("yyyyMMdd_HHmmss_zzz")));
@@ -3507,8 +4449,14 @@ bool ProductionCalibrationPage::writePackageSnapshot(
         || !save(QStringLiteral("low_acceptance.csv"), acceptanceCsv(snapshot.low))
         || !save(QStringLiteral("high_raw.bin"), captureBytes(snapshot.high))
         || !save(QStringLiteral("high_acceptance.csv"), acceptanceCsv(snapshot.high))
+        || !save(QStringLiteral("high_b_raw.bin"), captureBytes(snapshot.highB))
+        || !save(QStringLiteral("high_b_acceptance.csv"), acceptanceCsv(snapshot.highB))
+        || !save(QStringLiteral("offset_raw.bin"), captureBytes(snapshot.offset))
+        || !save(QStringLiteral("offset_acceptance.csv"), acceptanceCsv(snapshot.offset))
         || !save(QStringLiteral("low_mean_u16le.bin"), meanImageBytes(snapshot.low.meanPixels))
         || !save(QStringLiteral("high_mean_u16le.bin"), meanImageBytes(snapshot.high.meanPixels))
+        || !save(QStringLiteral("high_b_mean_u16le.bin"), meanImageBytes(snapshot.highB.meanPixels))
+        || !save(QStringLiteral("offset_mean_u16le.bin"), meanImageBytes(snapshot.offset.meanPixels))
         || !save(QStringLiteral("monitor_trace.csv"),
                  monitorTraceCsv(snapshot.monitorTrace))) {
         return false;
@@ -3516,7 +4464,9 @@ bool ProductionCalibrationPage::writePackageSnapshot(
     if (snapshot.calibration.valid) {
         if (!save(QStringLiteral("gain_f32le.bin"), snapshot.calibration.gain)
             || !save(QStringLiteral("bad_points.bin"), snapshot.calibration.badPoints)
-            || !save(QStringLiteral("calibration_v1.bin"), snapshot.calibration.packet)) {
+            || !save(QStringLiteral("calibration_v1.bin"), snapshot.calibration.packet)
+            || !save(QStringLiteral("thermal_model_v1.bin"),
+                     snapshot.calibration.thermalModelPacket)) {
             return false;
         }
     }
@@ -3535,6 +4485,10 @@ bool ProductionCalibrationPage::writePackageSnapshot(
     summary += "low_accepted," + QByteArray::number(snapshot.low.acceptedIndices.size()) + "\n";
     summary += "high_received," + QByteArray::number(snapshot.high.frames.size()) + "\n";
     summary += "high_accepted," + QByteArray::number(snapshot.high.acceptedIndices.size()) + "\n";
+    summary += "high_b_received," + QByteArray::number(snapshot.highB.frames.size()) + "\n";
+    summary += "high_b_accepted," + QByteArray::number(snapshot.highB.acceptedIndices.size()) + "\n";
+    summary += "offset_received," + QByteArray::number(snapshot.offset.frames.size()) + "\n";
+    summary += "offset_accepted," + QByteArray::number(snapshot.offset.acceptedIndices.size()) + "\n";
     summary += "low_mean_span_adu," + QByteArray::number(acceptedMeanSpan(snapshot.low), 'f', 6) + "\n";
     summary += "low_vtemp_span_adu," + QByteArray::number(acceptedVtempSpan(snapshot.low)) + "\n";
     summary += "high_mean_span_adu," + QByteArray::number(acceptedMeanSpan(snapshot.high), 'f', 6) + "\n";
@@ -3546,6 +4500,14 @@ bool ProductionCalibrationPage::writePackageSnapshot(
     summary += "ntc_k_q8," + QByteArray::number(snapshot.calibration.ntcModel.kQ8) + "\n";
     summary += "ntc_limit_adu," + QByteArray::number(snapshot.calibration.ntcModel.limitAdu) + "\n";
     summary += "write_readback_verified," + QByteArray(snapshot.calibration.writeVerified ? "true\n" : "false\n");
+    summary += "thermal_model_inputs_valid," + QByteArray(
+        snapshot.calibration.thermalModelValid ? "true\n" : "false\n");
+    summary += "thermal_model_readback_verified," + QByteArray(
+        snapshot.calibration.thermalModelWriteVerified ? "true\n" : "false\n");
+    summary += "state_a_ntc_adu," + QByteArray::number(
+        snapshot.stateAReference.ntcAdu) + "\n";
+    summary += "state_b_ready," + QByteArray(
+        snapshot.stateBReady ? "true\n" : "false\n");
     summary += "monitor_continuity_valid," + QByteArray(snapshot.monitorContinuityValid ? "true\n" : "false\n");
     summary += "ntc_coverage_c," + QByteArray::number(
         std::max(0.0, snapshot.ntcMaximumC - snapshot.ntcMinimumC), 'f', 6) + "\n";
@@ -3710,6 +4672,13 @@ bool ProductionCalibrationPage::writePackageSnapshot(
                        snapshot.calibration.coldStartModelAttempted);
     calibration.insert(QStringLiteral("write_readback_verified"),
                        snapshot.calibration.writeVerified);
+    calibration.insert(QStringLiteral("thermal_model_inputs_valid"),
+                       snapshot.calibration.thermalModelValid);
+    calibration.insert(QStringLiteral("thermal_model_readback_verified"),
+                       snapshot.calibration.thermalModelWriteVerified);
+    calibration.insert(QStringLiteral("thermal_model_state"),
+                       QJsonObject::fromVariantMap(
+                           snapshot.calibration.thermalModelState));
     calibration.insert(QStringLiteral("post_write_validation_attempted"),
                        snapshot.calibration.postWriteValidationAttempted);
     calibration.insert(QStringLiteral("post_write_validation_passed"),
@@ -3782,13 +4751,10 @@ bool ProductionCalibrationPage::writePackageSnapshot(
 
     QJsonObject manifest;
     manifest.insert(QStringLiteral("schema"), QStringLiteral("tn160.production-calibration.v1"));
-    manifest.insert(QStringLiteral("data_contract_version"), 5);
+    manifest.insert(QStringLiteral("data_contract_version"), 6);
     manifest.insert(QStringLiteral("algorithm"),
-                    EnableRowRefProduction
-                        ? QStringLiteral("v1_two_point_plus_row_reference")
-                        : QStringLiteral("v1_two_point_generic"));
-    manifest.insert(QStringLiteral("algorithm_version"),
-                    EnableRowRefProduction ? 6 : 1);
+                    QStringLiteral("v1_two_state_thermal_drift_test"));
+    manifest.insert(QStringLiteral("algorithm_version"), 1);
     manifest.insert(QStringLiteral("saved_at"),
                     QDateTime::currentDateTime().toString(Qt::ISODateWithMs));
     manifest.insert(QStringLiteral("sensor_id"), snapshot.sensorId);
@@ -3813,6 +4779,9 @@ bool ProductionCalibrationPage::writePackageSnapshot(
                     snapshot.monitorContinuityValid);
     manifest.insert(QStringLiteral("connection_reference"),
                     telemetryJson(snapshot.connectionReference));
+    manifest.insert(QStringLiteral("state_a_reference"),
+                    telemetryJson(snapshot.stateAReference));
+    manifest.insert(QStringLiteral("state_b_ready"), snapshot.stateBReady);
     QJsonObject coverage;
     coverage.insert(QStringLiteral("minimum_c"), snapshot.ntcMinimumC);
     coverage.insert(QStringLiteral("maximum_c"), snapshot.ntcMaximumC);
@@ -3845,6 +4814,8 @@ bool ProductionCalibrationPage::writePackageSnapshot(
     QJsonObject captures;
     captures.insert(QStringLiteral("low"), captureJson(snapshot.low));
     captures.insert(QStringLiteral("high"), captureJson(snapshot.high));
+    captures.insert(QStringLiteral("high_b"), captureJson(snapshot.highB));
+    captures.insert(QStringLiteral("offset"), captureJson(snapshot.offset));
     manifest.insert(QStringLiteral("captures"), captures);
     manifest.insert(QStringLiteral("calibration"), calibration);
     manifest.insert(QStringLiteral("files"), files);
@@ -4178,6 +5149,7 @@ ProductionWorkflowActions ProductionCalibrationPage::actionAvailability() const
     const bool calibrationStation = m_singleDeviceMode
         || (m_stationSegment >= 11 && m_stationSegment <= 16);
     const bool hasRunData = m_low.complete || m_high.complete
+        || m_highB.complete || m_offset.complete
         || !m_coldStartRecords.isEmpty()
         || m_coldStartWindowMissed || m_calibration.valid;
     ProductionWorkflowFacts facts;
@@ -4189,6 +5161,12 @@ ProductionWorkflowActions ProductionCalibrationPage::actionAvailability() const
     facts.calibrationStation = calibrationStation;
     facts.lowComplete = m_low.complete;
     facts.highComplete = m_high.complete;
+    facts.baseV1Established = m_baseV1Established;
+    facts.stateBReady = m_stateBReady;
+    facts.highBComplete = m_highB.complete;
+    facts.offsetComplete = m_offset.complete;
+    facts.thermalModelValid = m_calibration.thermalModelValid;
+    facts.thermalModelInstalled = m_thermalModelInstalled;
     facts.calibrationValid = m_calibration.valid;
     facts.productionPass = productionWriteAvailable();
     facts.testWriteAvailable = testWriteAvailable();
@@ -4199,6 +5177,8 @@ ProductionWorkflowActions ProductionCalibrationPage::actionAvailability() const
         || m_workflowState == QStringLiteral("test-completed")) {
         actions.captureLow = false;
         actions.captureHigh = false;
+        actions.captureHighB = false;
+        actions.captureOffset = false;
         actions.restartRun = false;
         actions.writeTest = false;
         actions.writeProduction = false;
@@ -4206,6 +5186,8 @@ ProductionWorkflowActions ProductionCalibrationPage::actionAvailability() const
     if (m_workflowState == QStringLiteral("validation-failed")) {
         actions.captureLow = false;
         actions.captureHigh = false;
+        actions.captureHighB = false;
+        actions.captureOffset = false;
         actions.writeTest = false;
         actions.writeProduction = false;
     }
@@ -4219,6 +5201,8 @@ void ProductionCalibrationPage::updateControls()
         || (m_stationSegment >= 11 && m_stationSegment <= 16);
     m_lowButton->setEnabled(actions.captureLow);
     m_highButton->setEnabled(actions.captureHigh);
+    m_highBButton->setEnabled(actions.captureHighB);
+    m_offsetButton->setEnabled(actions.captureOffset);
     m_importButton->setEnabled(!operationActive()
                                && m_finalizationStage == FinalizationStage::None
                                && calibrationStation);
@@ -4240,22 +5224,20 @@ void ProductionCalibrationPage::updateControls()
         m_restartButton->setEnabled(actions.restartRun);
     }
     if (m_writeButton) {
-        m_writeButton->setVisible(
-            calibrationStation && productionWriteAvailable());
-        m_writeButton->setEnabled(actions.writeProduction);
+        m_writeButton->setVisible(calibrationStation);
+        m_writeButton->setEnabled(actions.writeTest);
+    }
+    if (m_clearThermalModelButton) {
+        m_clearThermalModelButton->setVisible(
+            m_thermalModelInstalled);
+        m_clearThermalModelButton->setEnabled(actions.clearThermalModel);
     }
     if (m_testWriteButton) {
-        m_testWriteButton->setText(
-            EnableRowRefProduction && m_calibration.rowRefModel.valid
-                ? tr("写入RR测试件") : tr("写入基础V1测试件"));
-        m_testWriteButton->setVisible(
-            calibrationStation && m_calibration.valid
-            && !productionWriteAvailable());
-        m_testWriteButton->setEnabled(actions.writeTest);
+        m_testWriteButton->hide();
+        m_testWriteButton->setEnabled(false);
     }
     if (m_retryVerifyButton) {
-        m_retryVerifyButton->setVisible(
-            calibrationStation && m_writeAwaitingVerification);
+        m_retryVerifyButton->setVisible(calibrationStation);
         m_retryVerifyButton->setEnabled(actions.retryVerification);
     }
     emitWorkflowState();
@@ -4292,18 +5274,29 @@ void ProductionCalibrationPage::emitWorkflowState()
     state.insert(QStringLiteral("ntc_coverage_c"), ntcCoverageC());
     state.insert(QStringLiteral("low_complete"), m_low.complete);
     state.insert(QStringLiteral("high_complete"), m_high.complete);
+    state.insert(QStringLiteral("base_v1_established"),
+                 m_baseV1Established);
+    state.insert(QStringLiteral("mean_fallback_active"),
+                 m_baseV1Established
+                     && m_calibration.thermalModelState
+                            .value(QStringLiteral("mean_active")).toBool());
+    state.insert(QStringLiteral("state_b_ready"), m_stateBReady);
+    state.insert(QStringLiteral("high_b_complete"), m_highB.complete);
+    state.insert(QStringLiteral("offset_complete"), m_offset.complete);
+    state.insert(QStringLiteral("thermal_model_valid"),
+                 m_calibration.thermalModelValid);
+    state.insert(QStringLiteral("thermal_model_write_verified"),
+                 m_calibration.thermalModelWriteVerified);
+    state.insert(QStringLiteral("thermal_model_installed"),
+                 m_thermalModelInstalled);
     state.insert(QStringLiteral("row_ref_model_valid"),
                  m_calibration.rowRefModel.valid);
     state.insert(QStringLiteral("post_write_validation_passed"),
                  m_calibration.postWriteValidationPassed);
-    state.insert(QStringLiteral("production_pass"),
-                 !m_calibration.testWrite
-                     && m_low.complete && m_high.complete
-                     && m_calibration.writeVerified
-                     && (!EnableRowRefProduction
-                         || (m_calibration.rowRefModel.valid
-                             && m_calibration.postWriteValidationPassed)));
+    state.insert(QStringLiteral("production_pass"), false);
     state.insert(QStringLiteral("test_write_available"), testWriteAvailable());
+    state.insert(QStringLiteral("clear_thermal_model_action_enabled"),
+                 actions.clearThermalModel);
     state.insert(QStringLiteral("connection_action_enabled"),
                  actions.connection);
     state.insert(QStringLiteral("scan_action_enabled"), actions.scan);

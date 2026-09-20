@@ -55,6 +55,7 @@ bool validDefinition(const WorkspaceComponentDefinition &definition,
 } // namespace
 
 IWorkspaceComponentProvider::~IWorkspaceComponentProvider() = default;
+IWorkspaceComponentStateAdapter::~IWorkspaceComponentStateAdapter() = default;
 
 WorkspaceComponentRegistry::WorkspaceComponentRegistry(QObject *parent)
     : QObject(parent)
@@ -80,17 +81,13 @@ bool WorkspaceComponentRegistry::registerProvider(
         return false;
     }
     const bool lifetimeAlreadyTracked = lifetime
-        && std::any_of(m_entries.cbegin(), m_entries.cend(),
-                       [provider, lifetime](const Entry &entry) {
-                           return entry.provider == provider
-                               && entry.tracksLifetime
-                               && entry.lifetime.data() == lifetime;
-                       });
+        && m_lifetimeProviders.contains(lifetime)
+        && m_lifetimeProviders.value(lifetime) == provider;
     QSet<QString> ids;
-    for (WorkspaceComponentDefinition candidate : provided) {
+    for (WorkspaceComponentDefinition &candidate : provided) {
         candidate.definitionId = candidate.definitionId.trimmed();
         candidate.providerId = candidate.providerId.trimmed();
-        if (candidate.providerId.trimmed().isEmpty()) {
+        if (candidate.providerId.isEmpty()) {
             setError(error, QStringLiteral("组件 Provider ID 为空：%1")
                                   .arg(candidate.definitionId));
             return false;
@@ -120,9 +117,7 @@ bool WorkspaceComponentRegistry::registerProvider(
             changed = true;
         }
     }
-    for (WorkspaceComponentDefinition candidate : provided) {
-        candidate.definitionId = candidate.definitionId.trimmed();
-        candidate.providerId = candidate.providerId.trimmed();
+    for (WorkspaceComponentDefinition &candidate : provided) {
         Entry entry;
         entry.definition = std::move(candidate);
         entry.provider = provider;
@@ -131,8 +126,12 @@ bool WorkspaceComponentRegistry::registerProvider(
         m_entries.append(std::move(entry));
     }
     if (lifetime && !lifetimeAlreadyTracked) {
+        m_lifetimeProviders.insert(lifetime, provider);
         QObject::connect(lifetime, &QObject::destroyed, this,
-                         [this, provider] { unregisterProvider(provider); });
+                         [this, provider, lifetime] {
+                             m_lifetimeProviders.remove(lifetime);
+                             unregisterProvider(provider);
+                         });
     }
     if (changed || !provided.isEmpty()) emit definitionsChanged();
     return true;
@@ -155,6 +154,7 @@ void WorkspaceComponentRegistry::clear()
 {
     if (m_entries.isEmpty()) return;
     m_entries.clear();
+    m_lifetimeProviders.clear();
     emit definitionsChanged();
 }
 
@@ -178,7 +178,11 @@ WorkspaceComponentDefinition WorkspaceComponentRegistry::definition(
 
 bool WorkspaceComponentRegistry::contains(const QString &definitionId) const
 {
-    return !definition(definitionId).definitionId.isEmpty();
+    const QString id = definitionId.trimmed();
+    return std::any_of(m_entries.cbegin(), m_entries.cend(),
+                       [&id](const Entry &entry) {
+                           return entry.definition.definitionId == id;
+                       });
 }
 
 QWidget *WorkspaceComponentRegistry::createComponent(const QString &definitionId,

@@ -57,8 +57,11 @@ public slots:
                                const QString &bootselRoot);
     void captureLow();
     void captureHigh();
+    void captureHighB();
+    void captureOffset();
     void writeTestAndVerify();
     void writeAndVerify();
+    void clearThermalModel();
     void retryWriteVerification();
     void restartCurrentRun();
     void importCalibration();
@@ -119,15 +122,39 @@ private slots:
     void receiveVerifyHeader(const QByteArray &header);
     void receiveVerifyPayload(int index, const QByteArray &payload);
     void verifyCompleted(bool success, const QString &message);
+    void handleThermalModelUpload(bool success, const QVariantMap &result,
+                                   const QString &error);
+    void handleThermalModelClear(bool success, const QVariantMap &result,
+                                 const QString &error);
+    void handleThermalModelReadback(bool success, const QByteArray &packet,
+                                    const QString &error);
+    void handleThermalModelState(bool success, const QVariantMap &state,
+                                 const QString &error);
     void requestProductRecalibration();
 
 private:
-    enum class CaptureKind { None, Low, High };
+    enum class CaptureKind { None, Low, High, HighB, Offset };
     enum class Operation { Idle, Capturing, Writing, Verifying };
-    enum class VerifyPhase { None, TemporaryAddress, ProductAddress };
+    enum class VerifyPhase { None, BaseV1, TemporaryAddress, ProductAddress };
+    enum class ThermalModelStage {
+        None,
+        AwaitingBaseState,
+        Uploading,
+        ReadingBack,
+        VerifyingState,
+        Probing,
+        ReconcilingUploadPacket,
+        ReconcilingUploadFailure,
+        Clearing,
+        ReconcilingClear,
+    };
     enum class FinalizationStage {
         None,
         WaitingGrant,
+        WritingBaseV1,
+        ReconnectingBaseV1,
+        VerifyingBaseV1,
+        AwaitingBaseV1Monitor,
         ReconnectingTemporary,
         SwitchingToProduct,
         ReconnectingProduct,
@@ -184,6 +211,10 @@ private:
         qint16 rowRefModelKQ8 = 0;
         quint16 rowRefModelLimitAdu = 0;
         qint16 rowRefCompAdu = 0;
+        quint16 baseNtcAdu = 0;
+        bool thermalModelActive = false;
+        bool thermalModelClamped = false;
+        qint32 thermalModelGainScaleQ16 = 65536;
     };
 
     struct ColdStartRawRecord {
@@ -230,6 +261,10 @@ private:
         double postWriteMeanC = std::numeric_limits<double>::quiet_NaN();
         double postWritePeakToPeakC = std::numeric_limits<double>::quiet_NaN();
         bool testWrite = false;
+        QByteArray thermalModelPacket;
+        bool thermalModelValid = false;
+        bool thermalModelWriteVerified = false;
+        QVariantMap thermalModelState;
     };
 
     struct ArchiveSnapshot {
@@ -242,11 +277,15 @@ private:
         QString bootselRoot;
         CaptureData low;
         CaptureData high;
+        CaptureData highB;
+        CaptureData offset;
         QVector<ColdStartSample> coldStartSamples;
         quint64 coldStartPairRejected = 0;
         QVector<TelemetryState> monitorTrace;
         bool monitorContinuityValid = true;
         TelemetryState connectionReference;
+        TelemetryState stateAReference;
+        bool stateBReady = false;
         double ntcMinimumC = 0.0;
         double ntcMaximumC = 0.0;
         quint16 ntcMinimumAdu = 0;
@@ -266,6 +305,7 @@ private:
     void invalidateDownstreamAfterCapture(CaptureKind kind);
     void clearWriteAttemptState();
     void updateWorkflowAfterCapture(CaptureKind kind);
+    [[nodiscard]] bool stateBReady(const TelemetryState &state) const;
     void confirmMonitorConnection();
     void handleMonitorPackets(const serein::scope::PacketList &packets);
     void handleMonitorSample(const serein::scope::SamplePacket &packet);
@@ -296,8 +336,14 @@ private:
     void finishPostWriteValidation(bool passed, const QString &message);
 
     void prepareWritePacket();
+    void beginBaseV1Upload();
+    void completeBaseV1Write(quint32 payloadCrc, quint32 headerCrc,
+                             quint32 flashHeaderCrc);
     void beginWriteAndVerify(bool testWrite);
     void beginWriteUpload();
+    bool applySinglePointOffset(QString *error);
+    bool buildThermalModelPacket(QString *error);
+    void beginThermalModelUpload();
     void completeNcmWrite(quint32 payloadCrc, quint32 headerCrc,
                           quint32 flashHeaderCrc);
     void failOperation(const QString &message);
@@ -366,6 +412,9 @@ private:
     bool m_shuttingDown = false;
     bool m_singleDeviceMode = false;
     VerifyPhase m_verifyPhase = VerifyPhase::None;
+    ThermalModelStage m_thermalModelStage = ThermalModelStage::None;
+    int m_thermalModelStateAttempts = 0;
+    QString m_thermalModelPendingError;
     FinalizationStage m_finalizationStage = FinalizationStage::None;
     QString m_deviceSerial;
     QString m_endpoint = QStringLiteral("http://192.168.10.1");
@@ -410,6 +459,8 @@ private:
     QString m_disconnectCleanupSerial;
     bool m_writeCommitAttempted = false;
     bool m_writeAwaitingVerification = false;
+    bool m_baseV1Established = false;
+    bool m_thermalModelInstalled = false;
     QString m_workflowState = QStringLiteral("idle");
     std::unique_ptr<QFile> m_continuousAdcFile;
     std::unique_ptr<QFile> m_continuousIndexFile;
@@ -420,6 +471,10 @@ private:
     bool m_coldStartWindowMissed = false;
     CaptureData m_low;
     CaptureData m_high;
+    CaptureData m_highB;
+    CaptureData m_offset;
+    TelemetryState m_stateAReference;
+    bool m_stateBReady = false;
     CaptureData m_currentCapture;
     CalibrationData m_calibration;
     Tn160ProductionFrameFilter m_frameFilter;
@@ -434,10 +489,13 @@ private:
     QLabel *m_ntcStatus = nullptr;
     QPushButton *m_lowButton = nullptr;
     QPushButton *m_highButton = nullptr;
+    QPushButton *m_highBButton = nullptr;
+    QPushButton *m_offsetButton = nullptr;
     QPushButton *m_importButton = nullptr;
     QPushButton *m_exportButton = nullptr;
     QPushButton *m_restartButton = nullptr;
     QPushButton *m_writeButton = nullptr;
+    QPushButton *m_clearThermalModelButton = nullptr;
     QPushButton *m_testWriteButton = nullptr;
     QPushButton *m_retryVerifyButton = nullptr;
     QPlainTextEdit *m_productionLog = nullptr;

@@ -4,10 +4,12 @@
 #include <serein/scope/BackendIoTaskGroup.h>
 #include <serein/scope/SerialDataSession.h>
 #include <serein/scope/WorkspaceCanvas.h>
+#include <serein/scope/WorkspaceComponents.h>
 
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QByteArray>
 #include <QtCore/QQueue>
+#include <QtCore/QPointer>
 #include <QtCore/QTimer>
 #include <QtCore/QVector>
 #include <QtWidgets/QWidget>
@@ -35,7 +37,7 @@ struct DiagnosticRecord {
     QString ffcEvent;
 };
 
-class LivePage final : public QWidget {
+class LivePage final : public QWidget, public IWorkspaceComponentProvider {
     Q_OBJECT
 
 public:
@@ -61,6 +63,10 @@ public slots:
     [[nodiscard]] QWidget *contextPanel() const noexcept;
     [[nodiscard]] QWidget *inspectorPanel() const noexcept;
     [[nodiscard]] QWidget *outputPanel() const noexcept;
+    [[nodiscard]] QList<WorkspaceComponentDefinition>
+    componentDefinitions() const override;
+    QWidget *createComponent(const QString &definitionId,
+                              QWidget *parent) override;
 
 private slots:
     void handleState(const QString &state);
@@ -150,6 +156,8 @@ private:
     bool m_monitorGapActive = false;
     bool m_haveNucSignature = false;
     bool m_shuttingDown = false;
+    QList<QPointer<ThermalView>> m_componentThermals;
+    QList<QPointer<TrendWidget>> m_componentTrends;
 };
 
 } // namespace serein::scope::tn160

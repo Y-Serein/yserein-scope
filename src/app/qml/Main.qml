@@ -19,11 +19,12 @@ ApplicationWindow {
     title: "Serein Scope"
     flags: Qt.Window | Qt.FramelessWindowHint
     color: "transparent"
+    onClosing: Qt.quit()
 
     FileDialog {
         id: componentFileDialog
         title: "导入 Serein Scope 插件包"
-        nameFilters: ["Serein Scope 插件包 (*.sscomponent)"]
+        nameFilters: ["Serein Scope 插件包 (*.sscomponent)", "组件压缩包 (*.zip)", "所有文件 (*)"]
         onAccepted: root.workbench.importComponent(selectedFile)
     }
 

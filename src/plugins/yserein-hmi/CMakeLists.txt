@@ -8,8 +8,22 @@ add_library(serein_scope_yserein_hmi MODULE
     NumericDisplayControl.cpp
     HmiProjectModel.h
     HmiProjectModel.cpp
+    HmiToolchain.h
+    HmiToolchain.cpp
     DesignerCanvas.h
     DesignerCanvas.cpp
+    ControlSchema.h
+    ControlSchema.cpp
+    ControlModel.h
+    ControlModel.cpp
+    SchemaInspector.h
+    SchemaInspector.cpp
+    Change.h
+    Change.cpp
+    ChangeBuilder.h
+    ChangeBuilder.cpp
+    UndoController.h
+    UndoController.cpp
 )
 
 target_link_libraries(serein_scope_yserein_hmi

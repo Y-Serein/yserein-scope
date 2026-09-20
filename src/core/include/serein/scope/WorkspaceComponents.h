@@ -5,8 +5,10 @@
 
 #include <QtCore/QList>
 #include <QtCore/QFlags>
+#include <QtCore/QJsonObject>
 #include <QtCore/QObject>
 #include <QtCore/QPointer>
+#include <QtCore/QHash>
 #include <QtCore/QString>
 #include <QtCore/QSize>
 #include <QtCore/QUuid>
@@ -86,6 +88,7 @@ struct SEREIN_SCOPE_CORE_EXPORT WorkspaceComponentInstance {
     bool maximized = false;
     QList<WorkspaceBinding> bindings;
     QVariantMap properties;
+    QJsonObject extensions;
 };
 
 // Optional component-level extension. It is deliberately separate from
@@ -132,6 +135,14 @@ private:
     };
 
     QList<Entry> m_entries;
+    QHash<QObject *, IWorkspaceComponentProvider *> m_lifetimeProviders;
 };
 
 } // namespace serein::scope
+
+Q_DECLARE_INTERFACE(serein::scope::IWorkspaceComponentProvider,
+                    "com.serein.scope.IWorkspaceComponentProvider/1.0")
+
+Q_DECLARE_METATYPE(serein::scope::WorkspaceBinding)
+Q_DECLARE_METATYPE(QList<serein::scope::WorkspaceBinding>)
+Q_DECLARE_METATYPE(serein::scope::WorkspaceComponentInstance)

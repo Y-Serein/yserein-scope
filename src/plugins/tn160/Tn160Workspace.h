@@ -1,6 +1,7 @@
 #pragma once
 
 #include <serein/scope/PluginInterface.h>
+#include <serein/scope/WorkspaceComponents.h>
 
 #include <QtWidgets/QWidget>
 
@@ -15,7 +16,8 @@ class LivePage;
 class ProductionCalibrationPage;
 
 class Tn160Workspace final : public QWidget, public IDeviceWorkspace,
-                             public IWorkspaceUiProvider {
+                             public IWorkspaceUiProvider,
+                             public IWorkspaceComponentProvider {
     Q_OBJECT
     Q_INTERFACES(serein::scope::IDeviceWorkspace
                  serein::scope::IWorkspaceUiProvider)
@@ -25,6 +27,10 @@ public:
     ~Tn160Workspace() override = default;
     void shutdown() override;
     [[nodiscard]] WorkspaceUiProvider *workspaceUiProvider() override;
+    [[nodiscard]] QList<WorkspaceComponentDefinition>
+    componentDefinitions() const override;
+    QWidget *createComponent(const QString &definitionId,
+                              QWidget *parent) override;
 
     Q_INVOKABLE int currentPageIndex() const;
 

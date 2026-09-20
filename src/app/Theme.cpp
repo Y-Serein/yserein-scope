@@ -15,6 +15,14 @@ class MaterialStyle final : public QProxyStyle {
 public:
     explicit MaterialStyle(QStyle *base) : QProxyStyle(base) {}
 
+    int styleHint(const StyleHint hint, const QStyleOption *option = nullptr,
+                  const QWidget *widget = nullptr,
+                  QStyleHintReturn *returnData = nullptr) const override
+    {
+        if (hint == SH_ToolTip_WakeUpDelay) return 500;
+        return QProxyStyle::styleHint(hint, option, widget, returnData);
+    }
+
     void drawPrimitive(const PrimitiveElement element, const QStyleOption *option,
                        QPainter *painter, const QWidget *widget) const override
     {
@@ -105,6 +113,8 @@ QMainWindow#centerWorkbench::separator {
     width: 8px;
     height: 8px;
 }
+QMainWindow#workbenchHost::separator:hover,
+QMainWindow#centerWorkbench::separator:hover { background: #d7dee7; }
 QStatusBar#globalStatusBar {
     min-height: 24px;
     max-height: 30px;
@@ -294,6 +304,29 @@ QWidget#dockPanelContent {
     background: #ffffff;
     border: 1px solid #e2e5e9;
     border-radius: 8px;
+}
+QTabBar[workspacePanelHeaderControl="true"] {
+    background: transparent;
+    border: 0;
+}
+QTabBar[workspacePanelHeaderControl="true"]::tab {
+    min-height: 26px;
+    max-height: 26px;
+    margin: 3px 2px 3px 0;
+    padding: 0 11px;
+    color: #526171;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+}
+QTabBar[workspacePanelHeaderControl="true"]::tab:hover {
+    color: #1d2939;
+    background: #f4f6f8;
+}
+QTabBar[workspacePanelHeaderControl="true"]::tab:selected {
+    color: #2f6feb;
+    background: #eef4ff;
+    border-color: #c9d8f4;
 }
 QWidget[workspacePanelContribution="true"],
 QScrollArea[workspacePanelContribution="true"],
@@ -536,6 +569,11 @@ QFrame#workspaceComponent[selected="true"] { border-color: #2f6feb; }
 QWidget#componentContentClip,
 QWidget#componentContent,
 QWidget#metricsPanel { background: transparent; border: 0; }
+QFrame#workspaceComponent QScrollArea,
+QFrame#workspaceComponent QScrollArea > QWidget > QWidget {
+    background: transparent;
+    border: 0;
+}
 QFrame#componentTitleBar {
     background: transparent;
     border: 0;
@@ -834,6 +872,10 @@ QFrame#activityRail[darkMode="true"] {
     border: 0;
     border-right: 1px solid #3a454e;
 }
+QMainWindow#workbenchHost[darkMode="true"]::separator:hover,
+QMainWindow#centerWorkbench[darkMode="true"]::separator:hover {
+    background: #4a555f;
+}
 QDockWidget[darkMode="true"], QDockWidget[darkMode="true"] > QWidget,
 QWidget#dockPanelContent[darkMode="true"],
 QWidget#workspaceStack[darkMode="true"], QWidget#workbenchPage[darkMode="true"],
@@ -856,6 +898,20 @@ QWidget#dockPanelContent[darkMode="true"] {
     background: #252b31;
     border: 1px solid #4a555f;
     border-radius: 8px;
+}
+QTabBar[workspacePanelHeaderControl="true"][darkMode="true"]::tab {
+    color: #aab3bd;
+    background: transparent;
+    border-color: transparent;
+}
+QTabBar[workspacePanelHeaderControl="true"][darkMode="true"]::tab:hover {
+    color: #dfe5eb;
+    background: #303840;
+}
+QTabBar[workspacePanelHeaderControl="true"][darkMode="true"]::tab:selected {
+    color: #dbe8ff;
+    background: #34445d;
+    border-color: #566b8f;
 }
 QTabBar#hostWorkspaceTabs[darkMode="true"]::tab,
 QTabBar#workspaceTabs[darkMode="true"]::tab { color: #aab3bd; background: transparent; }

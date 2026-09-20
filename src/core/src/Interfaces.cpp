@@ -27,6 +27,8 @@ public:
     StoredPanelOptions contextPanel;
     StoredPanelOptions inspectorPanel;
     StoredPanelOptions outputPanel;
+    WorkspacePanelSide contextSide = WorkspacePanelSide::Default;
+    WorkspacePanelSide inspectorSide = WorkspacePanelSide::Default;
 };
 
 WorkspaceUiPresentationState *presentationState(const WorkspaceUiProvider *provider)
@@ -45,6 +47,12 @@ void storeOptions(StoredPanelOptions &target, const WorkspacePanelOptions &sourc
 WorkspacePanelOptions loadOptions(const StoredPanelOptions &source)
 {
     return {source.margins, source.headerControl.data()};
+}
+
+WorkspacePanelSide normalizeSide(const WorkspacePanelSide side)
+{
+    return side == WorkspacePanelSide::Left || side == WorkspacePanelSide::Right
+        ? side : WorkspacePanelSide::Default;
 }
 
 void markPanelContribution(WorkspacePanelPresentation &panel, const char *slot)
@@ -83,6 +91,32 @@ WorkspaceUiPresentationOptions WorkspaceUiProvider::presentationOptions() const 
     return {loadOptions(state->contextPanel),
             loadOptions(state->inspectorPanel),
             loadOptions(state->outputPanel)};
+}
+
+WorkspacePanelSide WorkspaceUiProvider::panelSide(const WorkspacePanelSlot slot) const noexcept
+{
+    const WorkspaceUiPresentationState *state = presentationState(this);
+    if (!state) return WorkspacePanelSide::Default;
+    switch (slot) {
+    case WorkspacePanelSlot::Context: return state->contextSide;
+    case WorkspacePanelSlot::Inspector: return state->inspectorSide;
+    case WorkspacePanelSlot::Output: return WorkspacePanelSide::Default;
+    }
+    return WorkspacePanelSide::Default;
+}
+
+void WorkspaceUiProvider::setPanelSides(const WorkspacePanelSide contextSide,
+                                        const WorkspacePanelSide inspectorSide)
+{
+    WorkspaceUiPresentationState *state = presentationState(this);
+    if (!state) return;
+    const WorkspacePanelSide normalizedContext = normalizeSide(contextSide);
+    const WorkspacePanelSide normalizedInspector = normalizeSide(inspectorSide);
+    if (state->contextSide == normalizedContext
+        && state->inspectorSide == normalizedInspector) return;
+    state->contextSide = normalizedContext;
+    state->inspectorSide = normalizedInspector;
+    emit presentationChanged();
 }
 
 void WorkspaceUiProvider::setContext(WorkspaceUiContext context)

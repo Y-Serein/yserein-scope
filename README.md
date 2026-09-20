@@ -43,6 +43,11 @@ C:\DOWNLOAD\Qt\Tools\Ninja
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Serein_Y\Project\yserein-scope\tools\windows_user_action.ps1"
 ```
 
+不要直接运行 `c++.exe`、`gcc.exe` 或测试 PE。构建脚本会先把 MinGW 和 Qt
+运行时目录放到子进程 `PATH`，并固定 CMake 使用同一套编译器，避免
+`libwinpthread-1.dll` 等运行时 DLL 缺失导致 Windows 弹窗。若候选程序仍在运行，
+脚本只会向候选路径对应的进程发送一次正常关闭请求并等待，不会强制结束其他程序。
+
 CMake 缓存和中间文件固定在 `build/windows-release/`。
 构建和候选目录生命周期检查通过后，生成一套可直接运行的扁平交付：
 

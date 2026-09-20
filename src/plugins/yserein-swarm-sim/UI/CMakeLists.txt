@@ -1,0 +1,7 @@
+add_subdirectory(Main)
+add_subdirectory(Config)
+add_subdirectory(ZControls)
+add_subdirectory(Middle)
+add_subdirectory(Head)
+add_subdirectory(Foot)
+add_subdirectory(Resources)

@@ -1,0 +1,16 @@
+<RCC>
+    <qresource prefix="/APM">
+        <file alias="Copter.OfflineEditing.params">Backend/MockVehicle/Vehicle/Copter3.6.OfflineEditing.params</file>
+    </qresource>
+
+    <qresource prefix="/MockVehicle">
+        <file alias="APMArduSubMockLink.params">Backend/MockVehicle/Vehicle/APMArduSubMockLink.params</file>
+        <file alias="PX4MockLink.params">Backend/MockVehicle/Vehicle/PX4MockLink.params</file>
+        <file alias="General.MetaData.json">Backend/MockVehicle/Vehicle/MockLink.General.MetaData.json</file>
+        <file alias="General.MetaData.json.xz">Backend/MockVehicle/Vehicle/MockLink.General.MetaData.json.xz</file>
+        <file alias="Parameter.MetaData.json.xz">Backend/MockVehicle/Vehicle/MockLink.Parameter.MetaData.json.xz</file>
+        <file alias="Parameter.MetaData.json">Backend/MockVehicle/Vehicle/MockLink.Parameter.MetaData.json</file>
+        <file alias="Arduplane.params.ftp.bin">Backend/MockVehicle/Vehicle/Mocklink.Arduplane.params.ftp.bin</file>
+        <file alias="ArduCopter.params.ftp.bin">Backend/MockVehicle/Vehicle/Mocklink.ArduCopter.params.ftp.bin</file>
+    </qresource>
+</RCC>

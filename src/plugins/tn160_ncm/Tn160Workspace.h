@@ -2,10 +2,13 @@
 
 #include <serein/scope/Packet.h>
 #include <serein/scope/PluginInterface.h>
+#include <serein/scope/WorkspaceCanvas.h>
+#include <serein/scope/WorkspaceComponents.h>
 
 #include <QtCore/QVariantMap>
 #include <QtCore/QString>
 #include <QtCore/QVector>
+#include <QtCore/QPointer>
 #include <QtWidgets/QWidget>
 
 class QLabel;
@@ -16,13 +19,15 @@ class QTabBar;
 
 namespace serein::scope::tn160ncm {
 
+
 class FirmwarePage;
 class ProductionCalibrationPage;
 class ThermalView;
 class TrendWidget;
 
 class Tn160Workspace final : public QWidget, public IDeviceWorkspace,
-                             public IWorkspaceUiProvider {
+                             public IWorkspaceUiProvider,
+                             public IWorkspaceComponentProvider {
     Q_OBJECT
     Q_INTERFACES(serein::scope::IDeviceWorkspace
                  serein::scope::IWorkspaceUiProvider)
@@ -32,7 +37,16 @@ public:
     ~Tn160Workspace() override = default;
     void shutdown() override;
     [[nodiscard]] WorkspaceUiProvider *workspaceUiProvider() override;
+    [[nodiscard]] QList<WorkspaceComponentDefinition>
+    componentDefinitions() const override;
+    QWidget *createComponent(const QString &definitionId,
+                              QWidget *parent) override;
     Q_INVOKABLE int currentPageIndex() const;
+
+signals:
+    void telemetryChanged(const QString &center, const QString &ntc,
+                          const QString &centerAdu, const QString &vtemp,
+                          const QString &fps);
 
 private:
     QWidget *createLiveSurface();
@@ -58,6 +72,7 @@ private:
     QWidget *m_outputPanel = nullptr;
     ThermalView *m_thermal = nullptr;
     TrendWidget *m_trend = nullptr;
+    ::serein::scope::WorkspaceCanvas *m_liveCanvas = nullptr;
     QLabel *m_deviceIdentity = nullptr;
     QLabel *m_connectionState = nullptr;
     QLabel *m_centerMetric = nullptr;
@@ -73,6 +88,8 @@ private:
     QString m_historySerial;
     qint64 m_firstSampleTimestampUs = 0;
     qint64 m_previousSampleTimestampUs = 0;
+    QList<QPointer<ThermalView>> m_componentThermals;
+    QList<QPointer<TrendWidget>> m_componentTrends;
 };
 
 } // namespace serein::scope::tn160ncm

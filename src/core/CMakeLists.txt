@@ -12,6 +12,9 @@ add_library(serein_scope_core SHARED
     include/serein/scope/SerialDataSession.h
     include/serein/scope/WorkspaceCanvas.h
     include/serein/scope/WorkspaceComponents.h
+    include/serein/scope/WorkspaceDocument.h
+    include/serein/scope/ChannelRegistry.h
+    include/serein/scope/WorkspaceComponentInspector.h
     src/BufferedDecoder.cpp
     src/BackendIoTaskGroup.cpp
     src/BackendRuntime.cpp
@@ -24,6 +27,9 @@ add_library(serein_scope_core SHARED
     src/SerialDataSession.cpp
     src/WorkspaceCanvas.cpp
     src/WorkspaceComponents.cpp
+    src/WorkspaceDocument.cpp
+    src/ChannelRegistry.cpp
+    src/WorkspaceComponentInspector.cpp
 )
 
 target_compile_definitions(serein_scope_core PRIVATE SEREIN_SCOPE_CORE_LIBRARY)

@@ -14,7 +14,20 @@ class QWidget;
 namespace serein::scope {
 
 struct WorkspaceComponentDefinition;
+struct WorkspaceComponentInstance;
 class IWorkspaceComponentProvider;
+
+// Optional runtime bridge for applying persisted/edited instance state to a
+// live component widget. The full component model is defined in
+// WorkspaceComponents.h; this declaration stays here so Qt's optional
+// interface metadata is visible to plugin headers without changing ABI 2.
+class SEREIN_SCOPE_CORE_EXPORT IWorkspaceComponentStateAdapter {
+public:
+    virtual ~IWorkspaceComponentStateAdapter();
+    virtual bool applyComponentState(
+        QWidget *component, const WorkspaceComponentInstance &instance,
+        QString *error = nullptr) = 0;
+};
 
 inline constexpr int PluginInterfaceVersion = 2;
 inline constexpr auto DevicePluginIid = "com.serein.scope.IDevicePlugin/2.0";
@@ -23,6 +36,8 @@ inline constexpr auto WorkspaceUiProviderIid =
     "com.serein.scope.IWorkspaceUiProvider/1.0";
 inline constexpr auto WorkspaceComponentProviderIid =
     "com.serein.scope.IWorkspaceComponentProvider/1.0";
+inline constexpr auto WorkspaceComponentStateAdapterIid =
+    "com.serein.scope.IWorkspaceComponentStateAdapter/1.0";
 
 struct PluginMetadata {
     QString id;
@@ -59,6 +74,15 @@ enum class WorkspacePanelSlot {
     Output,
 };
 
+// Optional semantic side preference for the two horizontal host slots.  This
+// lives outside the ABI2 by-value presentation structs; old providers keep
+// the host default while newer providers can express designer-style layouts.
+enum class WorkspacePanelSide {
+    Default,
+    Left,
+    Right,
+};
+
 // The host supplies the outer panel spacing. Default is Standard for side
 // panels and Flush for Output. A component can opt out for a scroll surface
 // that already owns its content inset.
@@ -74,6 +98,7 @@ enum class WorkspaceLayoutProfile {
     CompactTask,
     Diagnostics,
     CalibrationTask,
+    Authoring,
 };
 
 struct WorkspacePanelPresentation {
@@ -129,6 +154,9 @@ public:
 
     [[nodiscard]] const WorkspaceUiContext &context() const noexcept;
     [[nodiscard]] WorkspaceUiPresentationOptions presentationOptions() const noexcept;
+    [[nodiscard]] WorkspacePanelSide panelSide(WorkspacePanelSlot slot) const noexcept;
+    void setPanelSides(WorkspacePanelSide contextSide,
+                       WorkspacePanelSide inspectorSide);
     void prepareContextChange();
     void setContext(WorkspaceUiContext context);
     void setContext(WorkspaceUiContext context,
@@ -166,5 +194,5 @@ Q_DECLARE_INTERFACE(serein::scope::IDeviceWorkspace,
                     "com.serein.scope.IDeviceWorkspace/1.0")
 Q_DECLARE_INTERFACE(serein::scope::IWorkspaceUiProvider,
                     "com.serein.scope.IWorkspaceUiProvider/1.0")
-Q_DECLARE_INTERFACE(serein::scope::IWorkspaceComponentProvider,
-                    "com.serein.scope.IWorkspaceComponentProvider/1.0")
+Q_DECLARE_INTERFACE(serein::scope::IWorkspaceComponentStateAdapter,
+                    "com.serein.scope.IWorkspaceComponentStateAdapter/1.0")

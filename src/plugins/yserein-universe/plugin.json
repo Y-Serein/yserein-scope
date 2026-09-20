@@ -1,0 +1,10 @@
+{
+  "id": "yserein-universe",
+  "name": "YSerein Universe",
+  "description": "GMAT → YSerein Adapter → OpenSpace 全链路闭环调用工具：一键运行轨道生成、轨迹统一格式转换、OpenSpace 资产可视化与运行时验证。",
+  "version": "0.1.0",
+  "category": "仿真工具",
+  "accent": "#d97706",
+  "capabilities": ["GMAT 轨道求解", "轨迹统一格式转换", "OpenSpace 资产可视化", "OpenSpace 运行时验证", "一键闭环运行"],
+  "interfaceVersion": 2
+}

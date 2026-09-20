@@ -110,6 +110,19 @@ WorkspaceUiProvider *Tn160Workspace::workspaceUiProvider()
     return m_uiProvider;
 }
 
+QList<WorkspaceComponentDefinition> Tn160Workspace::componentDefinitions() const
+{
+    return m_live && currentPageIndex() == 1 ? m_live->componentDefinitions()
+                  : QList<WorkspaceComponentDefinition>{};
+}
+
+QWidget *Tn160Workspace::createComponent(const QString &definitionId,
+                                         QWidget *parent)
+{
+    return m_live && currentPageIndex() == 1
+        ? m_live->createComponent(definitionId, parent) : nullptr;
+}
+
 void Tn160Workspace::selectPage(const int index)
 {
     if (index < 0 || index >= Pages.size()) return;
@@ -141,10 +154,7 @@ void Tn160Workspace::selectPage(const int index)
         uiContext.inspectorPanel = {m_live->inspectorPanel(), tr("实时数据"), nullptr, {}};
         uiContext.outputPanel = {m_live->outputPanel(), tr("实时趋势"), m_live,
                                  QByteArrayLiteral("clearDiagnosticSession")};
-        uiContext.componentLibrary.items = {
-            {QStringLiteral("thermal"), tr("TN160 热图"),
-             QStringLiteral(":/serein/thermal.svg")},
-        };
+        uiContext.componentLibrary.items = {};
         uiContext.componentLibrary.activationTarget = m_live;
         uiContext.componentLibrary.activationMethod =
             QByteArrayLiteral("activateLibraryComponent");

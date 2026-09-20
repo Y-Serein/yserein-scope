@@ -1,3 +1,6 @@
+# QZipReader(用于 .zip 组件包导入)位于 QtCore 私有头中
+find_package(Qt6 6.4 REQUIRED COMPONENTS CorePrivate)
+
 qt_add_executable(SereinScope WIN32
     main.cpp
     ComponentManager.h
@@ -55,6 +58,7 @@ qt_add_resources(SereinScope "app_resources"
 target_link_libraries(SereinScope PRIVATE
     serein_scope_core
     Qt6::Core
+    Qt6::CorePrivate
     Qt6::Gui
     Qt6::Qml
     Qt6::Quick

@@ -298,7 +298,7 @@ bool QuickWorkbenchController::openComponent(const QString &componentId)
         emit workspaceWindowChanged();
         emit inspectorChanged();
         refreshConnectionContext();
-        return existing->widget;
+        return existing->widget != nullptr;
     }
 
     QString error;
@@ -487,36 +487,54 @@ bool QuickWorkbenchController::showLibraryComponent(const QString &componentId)
 {
     QWidget *workspace = activeWorkspace();
     if (!workspace || componentId.trimmed().isEmpty()) return false;
+    QString normalized = componentId.trimmed();
+    if (serialWorkspace()) {
+        if (normalized == QStringLiteral("waveform")) {
+            normalized = QStringLiteral("serial-scope.waveform");
+        } else if (normalized == QStringLiteral("channels")) {
+            normalized = QStringLiteral("serial-scope.channels");
+        } else if (normalized == QStringLiteral("terminal")) {
+            normalized = QStringLiteral("serial-scope.terminal");
+        }
+    }
     for (QObject *canvas : workspace->findChildren<QObject *>(
              QStringLiteral("workspaceCanvas"))) {
         bool added = false;
         if (QMetaObject::invokeMethod(canvas, "addOrShowComponentAt", Qt::DirectConnection,
                                       Q_RETURN_ARG(bool, added),
-                                      Q_ARG(QString, componentId),
+                                      Q_ARG(QString, normalized),
                                       Q_ARG(QPoint, QPoint(-1, -1))) && added) {
             setComponentLibraryVisible(false);
             return true;
         }
     }
-    log(QStringLiteral("warning"), tr("当前工作区不支持组件：%1").arg(componentId));
+    log(QStringLiteral("warning"), tr("当前工作区不支持组件：%1").arg(normalized));
     return false;
 }
 
 QStringList QuickWorkbenchController::availableLibraryComponents() const
 {
-    if (serialWorkspace()) return {QStringLiteral("waveform"),
-                                   QStringLiteral("channels"),
-                                   QStringLiteral("terminal")};
-    if (tn160PageIndex() == 1) return {QStringLiteral("thermal")};
+    if (serialWorkspace()) return {QStringLiteral("serial-scope.waveform"),
+                                   QStringLiteral("serial-scope.channels"),
+                                   QStringLiteral("serial-scope.terminal")};
+    if (tn160PageIndex() == 1) return {QStringLiteral("tn160.thermal"),
+                                      QStringLiteral("tn160.measurements"),
+                                      QStringLiteral("tn160.trend")};
     return {};
 }
 
 QString QuickWorkbenchController::libraryComponentTitle(const QString &componentId) const
 {
-    if (componentId == QStringLiteral("waveform")) return tr("实时波形");
-    if (componentId == QStringLiteral("channels")) return tr("数据通道");
-    if (componentId == QStringLiteral("terminal")) return tr("串口终端");
-    if (componentId == QStringLiteral("thermal")) return tr("TN160 热图");
+    if (componentId == QStringLiteral("serial-scope.waveform")
+        || componentId == QStringLiteral("waveform")) return tr("实时波形");
+    if (componentId == QStringLiteral("serial-scope.channels")
+        || componentId == QStringLiteral("channels")) return tr("数据通道");
+    if (componentId == QStringLiteral("serial-scope.terminal")
+        || componentId == QStringLiteral("terminal")) return tr("串口终端");
+    if (componentId == QStringLiteral("thermal")
+        || componentId == QStringLiteral("tn160.thermal")) return tr("TN160 热图");
+    if (componentId == QStringLiteral("tn160.measurements")) return tr("关键测量");
+    if (componentId == QStringLiteral("tn160.trend")) return tr("实时趋势");
     return componentId;
 }
 
@@ -708,15 +726,8 @@ void QuickWorkbenchController::prepareComponents()
 {
     m_components->discover();
     const QString packagedPath = ComponentManager::packagedStorePath();
-    QDir packagedComponents(packagedPath);
     if (!packagedPath.isEmpty()) {
-        for (const QFileInfo &package : packagedComponents.entryInfoList(
-                 {QStringLiteral("*.sscomponent")}, QDir::Files, QDir::Name)) {
-            QString error;
-            if (m_components->importPackage(package.absoluteFilePath(), &error).isEmpty()) {
-                log(QStringLiteral("warning"), tr("内置插件包导入失败：%1").arg(error));
-            }
-        }
+        m_components->importPackagesFrom(packagedPath);
     }
     m_components->restorePreferredComponents();
     refreshComponents();

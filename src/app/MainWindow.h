@@ -1,7 +1,9 @@
 #pragma once
 
 #include <serein/scope/PluginInterface.h>
+#include <serein/scope/WorkspaceComponentInspector.h>
 #include <serein/scope/WorkspaceComponents.h>
+#include <serein/scope/WorkspaceDocument.h>
 
 #include <QtCore/QPoint>
 #include <QtCore/QPointer>
@@ -11,6 +13,7 @@
 #include <memory>
 #include <vector>
 
+class QCloseEvent;
 class QDockWidget;
 class QEvent;
 class QHBoxLayout;
@@ -48,6 +51,10 @@ private slots:
     void navigationChanged();
     void toggleComponentManagement();
     void importComponent();
+    void importWorkspaceDocument();
+    void exportWorkspaceDocument();
+    void toggleCanvasEditLocked();
+    void resetCanvasLayout();
     void refreshComponentUi();
     void preparePageLayoutChange();
     void resetDockLayout();
@@ -117,11 +124,16 @@ private:
     QString componentPackageStartPath() const;
     void refreshComponentLibrary();
     void showLibraryComponent(const QString &componentId);
+    void beginComponentPlacement(const QString &componentId);
     bool createRegisteredComponentAt(const QString &componentId,
                                      const QPoint &position);
     void synchronizeComponentRegistry();
     void synchronizeContextPanels();
+    void applyWorkspacePanelDockSides();
+    void synchronizeGenericInspector();
     void synchronizePanelHeaderControls();
+    bool applyWorkspaceDocument(const WorkspaceDocument &document,
+                                QString *error = nullptr);
     void synchronizePanelHeaderControl(QDockWidget *dock, QWidget *panel,
                                        QWidget *header,
                                        const WorkspacePanelOptions &options,
@@ -194,6 +206,7 @@ private:
     QWidget *m_inspectorContributionHost = nullptr;
     QVBoxLayout *m_inspectorBodyLayout = nullptr;
     QVBoxLayout *m_inspectorContributionLayout = nullptr;
+    WorkspaceComponentInspector *m_genericInspector = nullptr;
     QWidget *m_rootShell = nullptr;
     QHBoxLayout *m_rootLayout = nullptr;
     QMainWindow *m_workbenchWindow = nullptr;
@@ -204,11 +217,13 @@ private:
     bool m_pageLayoutsReady = false;
     bool m_applyingPageLayout = false;
     quint64 m_pageLayoutRevision = 0;
+    quint64 m_outputResizeSaveRevision = 0;
     int m_homeCardColumns = 0;
     int m_componentCardColumns = 0;
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
+    void closeEvent(QCloseEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 };

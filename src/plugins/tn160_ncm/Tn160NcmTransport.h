@@ -51,6 +51,10 @@ public slots:
     void ingest(const QByteArray &data);
     void uploadCalibration(const QByteArray &packet,
                            bool completeProduction = false);
+    void uploadThermalModel(const QByteArray &packet);
+    void clearThermalModel();
+    void requestThermalModel();
+    void requestThermalModelState();
     void setNetworkSegment(int segment);
 
 signals:
@@ -62,6 +66,14 @@ signals:
     void errorOccurred(const QString &message);
     void calibrationUploadFinished(bool success, const QVariantMap &result,
                                    const QString &error);
+    void thermalModelUploadFinished(bool success, const QVariantMap &result,
+                                    const QString &error);
+    void thermalModelClearFinished(bool success, const QVariantMap &result,
+                                   const QString &error);
+    void thermalModelReadbackFinished(bool success, const QByteArray &packet,
+                                      const QString &error);
+    void thermalModelStateReady(bool success, const QVariantMap &state,
+                                const QString &error);
     void networkSegmentChangeFinished(bool success, int segment,
                                       const QString &error);
     void monitorFrameMetadata(qint64 hostTimestampUs, quint32 frameNumber,
@@ -118,6 +130,10 @@ private:
     serein::scope::HttpRequestClient::RequestId m_reply = 0;
     serein::scope::HttpRequestClient::RequestId m_diagnosticsReply = 0;
     serein::scope::HttpRequestClient::RequestId m_uploadReply = 0;
+    serein::scope::HttpRequestClient::RequestId m_thermalModelUploadReply = 0;
+    serein::scope::HttpRequestClient::RequestId m_thermalModelClearReply = 0;
+    serein::scope::HttpRequestClient::RequestId m_thermalModelReadReply = 0;
+    serein::scope::HttpRequestClient::RequestId m_thermalModelStateReply = 0;
     serein::scope::HttpRequestClient::RequestId m_networkReply = 0;
     serein::scope::HttpRequestClient::RequestId m_continuousAdcReply = 0;
     QTimer m_pollTimer;

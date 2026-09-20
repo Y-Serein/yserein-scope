@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QtCore/QQueue>
+#include <QtCore/QSet>
 #include <QtCore/QStringList>
 #include <QtCore/QVector>
 #include <QtWidgets/QWidget>
@@ -21,6 +22,7 @@ public:
     [[nodiscard]] QColor channelColor(int index) const;
     [[nodiscard]] qreal lineWidth() const noexcept;
     void setLineWidth(qreal width);
+    void setBoundChannelIndices(QSet<int> indices, bool bindingActive);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -30,6 +32,8 @@ private:
     QVector<QQueue<double>> m_series;
     QStringList m_labels;
     QVector<bool> m_visible;
+    QSet<int> m_boundChannelIndices;
+    bool m_bindingActive = false;
     qreal m_lineWidth = 1.35;
 };
 

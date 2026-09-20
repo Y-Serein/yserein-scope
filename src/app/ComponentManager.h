@@ -36,6 +36,7 @@ public:
     [[nodiscard]] bool isLoaded(const QString &id) const;
 
     void discover();
+    void importPackagesFrom(const QString &dirPath);
     void restorePreferredComponents();
     QString importPackage(const QString &sourcePath, QString *error = nullptr);
     bool load(const QString &id, QString *error = nullptr, bool remember = true);
@@ -48,7 +49,8 @@ signals:
 private:
     struct ComponentRecord {
         PluginMetadata metadata;
-        QString packagePath;
+        QString packagePath; // 插件库(.sscomponent)文件路径
+        QString packageDir;  // 插件包目录(自包含目录组件时用于 DLL 搜索路径)
         QString error;
         std::unique_ptr<QPluginLoader> loader;
         IDevicePlugin *plugin = nullptr;
@@ -58,6 +60,8 @@ private:
                                                      QString *error = nullptr);
     [[nodiscard]] ComponentRecord *findRecord(const QString &id);
     [[nodiscard]] const ComponentRecord *findRecord(const QString &id) const;
+    [[nodiscard]] QStringList removedIds() const;
+    void setRemoved(const QString &id, bool removed = true);
     void rememberLoaded(const QString &id, bool loaded);
     void report(const QString &level, const QString &message) const;
 

@@ -11,6 +11,12 @@ struct ProductionWorkflowFacts {
     bool calibrationStation = false;
     bool lowComplete = false;
     bool highComplete = false;
+    bool baseV1Established = false;
+    bool stateBReady = false;
+    bool highBComplete = false;
+    bool offsetComplete = false;
+    bool thermalModelValid = false;
+    bool thermalModelInstalled = false;
     bool calibrationValid = false;
     bool productionPass = false;
     bool testWriteAvailable = false;
@@ -24,10 +30,13 @@ struct ProductionWorkflowActions {
     bool editEndpoint = false;
     bool captureLow = false;
     bool captureHigh = false;
+    bool captureHighB = false;
+    bool captureOffset = false;
     bool restartRun = false;
     bool writeTest = false;
     bool writeProduction = false;
     bool retryVerification = false;
+    bool clearThermalModel = false;
 };
 
 [[nodiscard]] inline ProductionWorkflowActions evaluateProductionWorkflow(
@@ -44,16 +53,27 @@ struct ProductionWorkflowActions {
                               && !facts.writeRecoveryAvailable
                               && facts.transportActive && facts.monitorReady
                               && facts.calibrationStation;
-    actions.captureLow = captureReady;
-    actions.captureHigh = captureReady && facts.lowComplete;
+    actions.captureLow = captureReady && !facts.baseV1Established;
+    actions.captureHigh = captureReady && facts.lowComplete
+                          && !facts.baseV1Established;
+    actions.captureHighB = captureReady && facts.calibrationValid
+                           && facts.baseV1Established && facts.stateBReady;
+    actions.captureOffset = captureReady && facts.calibrationValid
+                            && facts.baseV1Established
+                            && facts.highBComplete;
     actions.restartRun = facts.idle && !facts.finalizing
                         && !facts.writeRecoveryAvailable
                         && facts.calibrationStation && facts.hasRunData;
     actions.writeTest = captureReady && facts.testWriteAvailable
+                        && facts.offsetComplete && facts.thermalModelValid
                         && !facts.productionPass;
     actions.writeProduction = captureReady && facts.productionPass;
     actions.retryVerification = facts.idle && !facts.finalizing
                                 && facts.writeRecoveryAvailable;
+    actions.clearThermalModel = facts.idle && !facts.finalizing
+                                && !facts.writeRecoveryAvailable
+                                && facts.transportActive && facts.monitorReady
+                                && facts.thermalModelInstalled;
     return actions;
 }
 

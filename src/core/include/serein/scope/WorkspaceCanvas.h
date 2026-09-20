@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreExport.h"
+#include "WorkspaceDocument.h"
 
 #include <QtCore/QPoint>
 #include <QtCore/QRect>
@@ -49,6 +50,8 @@ class SEREIN_SCOPE_CORE_EXPORT ComponentFrame final : public QFrame {
 
 public:
     [[nodiscard]] QString componentId() const;
+    [[nodiscard]] QString definitionId() const;
+    [[nodiscard]] QUuid instanceId() const;
     void setEditLocked(bool locked);
     [[nodiscard]] bool editLocked() const;
     void setSelected(bool selected);
@@ -74,7 +77,8 @@ protected:
 private:
     friend class WorkspaceCanvas;
 
-    explicit ComponentFrame(QString componentId, QString title, QWidget *content,
+    explicit ComponentFrame(QString componentId, QString definitionId,
+                            QUuid instanceId, QString title, QWidget *content,
                             QWidget *parent = nullptr);
     ~ComponentFrame() override;
 
@@ -100,8 +104,11 @@ private:
     void finishInteraction();
     void updateCursor(const QPoint &position);
     void updateChrome();
+    void setInstanceId(const QUuid &instanceId);
 
     QString m_componentId;
+    QString m_definitionId;
+    QUuid m_instanceId;
     QFrame *m_titleBar = nullptr;
     QLabel *m_title = nullptr;
     QToolButton *m_menu = nullptr;
@@ -127,9 +134,34 @@ public:
     ComponentFrame *addComponent(const QString &componentId, const QString &title,
                                  QWidget *content, const QRectF &defaultGeometry,
                                  const QSize &minimumSize);
+    ComponentFrame *addComponentInstance(const QString &definitionId,
+                                         const QUuid &instanceId,
+                                         const QString &title, QWidget *content,
+                                         const QRectF &defaultGeometry,
+                                         const QSize &minimumSize,
+                                         bool loadLegacySettings = false);
     [[nodiscard]] ComponentFrame *componentFrame(const QString &componentId) const;
+    [[nodiscard]] ComponentFrame *componentFrameByInstance(
+        const QUuid &instanceId) const;
     [[nodiscard]] QStringList componentIds() const;
     [[nodiscard]] bool hasStoredLayout() const;
+    [[nodiscard]] QString selectedComponentId() const;
+    [[nodiscard]] WorkspaceComponentInstance componentInstance(
+        const QString &componentId) const;
+    [[nodiscard]] QWidget *componentContent(const QString &componentId) const;
+    [[nodiscard]] QWidget *componentContentByInstance(const QUuid &instanceId) const;
+    bool removeComponentInstance(const QUuid &instanceId);
+    bool updateComponentInstance(const WorkspaceComponentInstance &instance,
+                                 QString *error = nullptr);
+
+    // Serializes the current canvas boundary only. Runtime widget pointers,
+    // sessions and sampled data deliberately remain outside the document.
+    [[nodiscard]] WorkspaceDocument document() const;
+    // Applies one-page document state atomically after validating every
+    // definition and instance. Multiple instances may share a definition ID;
+    // instance UUIDs remain unique within the document.
+    bool applyDocument(const WorkspaceDocument &document,
+                       QString *error = nullptr);
 
     void setEditLocked(bool locked);
     [[nodiscard]] bool editLocked() const;
@@ -145,7 +177,10 @@ signals:
     void editLockedChanged(bool locked);
     void componentVisibilityChanged(const QString &componentId, bool visible);
     void componentDropRequested(const QString &componentId,
-                                const QPoint &position);
+                                 const QPoint &position);
+    void componentSelectionChanged(const QString &componentId);
+    void componentStateChanged(
+        const serein::scope::WorkspaceComponentInstance &instance);
     void focusModeChanged(bool focused);
     void layoutChanged();
 

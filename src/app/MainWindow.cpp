@@ -17,6 +17,7 @@
 #include <QtCore/QTime>
 #include <QtCore/QTimer>
 #include <QtCore/QVariantAnimation>
+#include <QtGui/QCloseEvent>
 #include <QtGui/QIcon>
 #include <QtGui/QConicalGradient>
 #include <QtGui/QDrag>
@@ -72,6 +73,8 @@ const QString ComponentsId = QStringLiteral("__components__");
 const QString LastActivePageSettingsKey = QStringLiteral("main/last-active-page-v1");
 const QString LastComponentImportDirectoryKey =
     QStringLiteral("components/last-import-directory-v1");
+const QString LastWorkspaceDirectoryKey =
+    QStringLiteral("workspaces/last-directory-v1");
 const QString DockSettingsKey = QStringLiteral("main/docks-v15-output-clear-connection-right");
 const QString CentralDockSettingsKey = QStringLiteral("main/central-dock-v1");
 const QString PageLayoutSettingsGroup = QStringLiteral("main/page-layout-v1");
@@ -716,6 +719,7 @@ MainWindow::MainWindow(QWidget *parent)
         applyDefaultDockLayout();
     }
     m_pageLayoutsReady = true;
+    applyWorkspacePanelDockSides();
     switchPageLayoutContext();
     if (QCoreApplication::arguments().contains(QStringLiteral("--dark"))) {
         applyDarkMode(true);
@@ -892,17 +896,8 @@ void MainWindow::prepareComponents()
     m_components = new ComponentManager(this, storePath, true, this);
     m_components->discover();
     const QString packagedPath = ComponentManager::packagedStorePath();
-    QDir packagedComponents(packagedPath);
     if (!packagedPath.isEmpty()) {
-        const QFileInfoList packages = packagedComponents.entryInfoList(
-            {QStringLiteral("*.sscomponent")}, QDir::Files, QDir::Name);
-        for (const QFileInfo &package : packages) {
-            QString error;
-            if (m_components->importPackage(package.absoluteFilePath(), &error).isEmpty()) {
-                log(QStringLiteral("warning"),
-                    tr("内置插件包导入失败：%1").arg(error));
-            }
-        }
+        m_components->importPackagesFrom(packagedPath);
     }
     for (const QString &argument : QCoreApplication::arguments()) {
         if (!argument.startsWith(QStringLiteral("--import-component="))) continue;
@@ -1336,6 +1331,10 @@ void MainWindow::buildDocks()
             [this](QListWidgetItem *item) {
         if (item) showLibraryComponent(item->data(Qt::UserRole).toString());
     });
+    connect(libraryList, &QListWidget::itemClicked, this,
+            [this](QListWidgetItem *item) {
+        if (item) beginComponentPlacement(item->data(Qt::UserRole).toString());
+    });
     m_componentLibraryDock->setWidget(libraryPanel);
     m_workbenchWindow->addDockWidget(Qt::LeftDockWidgetArea, m_componentLibraryDock);
     m_componentLibraryDock->hide();
@@ -1463,6 +1462,18 @@ void MainWindow::buildDocks()
     m_inspectorContributionLayout->setSpacing(0);
     m_inspectorContributionHost->hide();
     inspectorLayout->addWidget(m_inspectorContributionHost, 1);
+    m_genericInspector = new WorkspaceComponentInspector(m_inspectorContributionHost);
+    m_genericInspector->hide();
+    connect(m_genericInspector, &WorkspaceComponentInspector::stateChanged, this,
+            [this](const WorkspaceComponentInstance &instance) {
+        QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
+        auto *canvas = workspace ? workspace->findChild<WorkspaceCanvas *>() : nullptr;
+        if (!canvas) return;
+        QString error;
+        if (!canvas->updateComponentInstance(instance, &error) && !error.isEmpty()) {
+            log(QStringLiteral("warning"), tr("组件属性未应用：%1").arg(error));
+        }
+    });
     inspectorLayout->addStretch();
     inspectorScroll->setWidget(inspectorContent);
     inspectorShell.bodyLayout->addWidget(inspectorScroll, 1);
@@ -1484,7 +1495,6 @@ void MainWindow::buildDocks()
     connect(m_navigationToggle, &QToolButton::clicked, m_navigationDock,
             [this] {
                 const bool visible = m_navigationToggle->isChecked();
-                if (visible) m_componentLibraryDock->hide();
                 m_navigationDock->setVisible(visible);
             });
     connect(m_inspectorToggle, &QToolButton::clicked, m_inspectorDock,
@@ -1495,9 +1505,13 @@ void MainWindow::buildDocks()
             [this] {
                 if (!m_componentLibraryDock) return;
                 const bool visible = !m_componentLibraryDock->isVisible();
-                if (visible) m_navigationDock->hide();
                 m_componentLibraryDock->setVisible(visible);
-                if (visible) m_componentLibraryDock->raise();
+                if (visible) {
+                    m_componentLibraryDock->raise();
+                    m_navigationDock->hide();
+                } else {
+                    m_navigationDock->show();
+                }
             });
     connect(m_navigationDock, &QDockWidget::visibilityChanged,
             m_navigationToggle, &QToolButton::setChecked);
@@ -1586,6 +1600,12 @@ void MainWindow::buildMenu()
     workspace->addSeparator();
     auto *import = workspace->addAction(tr("导入组件包…"));
     connect(import, &QAction::triggered, this, &MainWindow::importComponent);
+    auto *importWorkspace = workspace->addAction(tr("导入工作台…"));
+    connect(importWorkspace, &QAction::triggered,
+            this, &MainWindow::importWorkspaceDocument);
+    auto *exportWorkspace = workspace->addAction(tr("导出工作台…"));
+    connect(exportWorkspace, &QAction::triggered,
+            this, &MainWindow::exportWorkspaceDocument);
     auto *close = workspace->addAction(tr("关闭当前工作区"));
     connect(close, &QAction::triggered, m_closeWorkspace, &QPushButton::click);
     auto *unload = workspace->addAction(tr("卸载当前组件"));
@@ -1596,6 +1616,13 @@ void MainWindow::buildMenu()
     view->addAction(m_outputDock->toggleViewAction());
     auto *reset = workspace->addAction(tr("恢复当前页面默认布局"));
     connect(reset, &QAction::triggered, this, &MainWindow::resetDockLayout);
+    auto *toggleCanvasLock = workspace->addAction(tr("锁定/解锁组件布局"));
+    toggleCanvasLock->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
+    connect(toggleCanvasLock, &QAction::triggered,
+            this, &MainWindow::toggleCanvasEditLocked);
+    auto *resetCanvas = workspace->addAction(tr("恢复当前组件模板"));
+    connect(resetCanvas, &QAction::triggered,
+            this, &MainWindow::resetCanvasLayout);
     auto *resetAll = workspace->addAction(tr("恢复全部页面默认布局…"));
     connect(resetAll, &QAction::triggered, this, [this] {
         if (QMessageBox::question(
@@ -1617,12 +1644,17 @@ void MainWindow::buildMenu()
         file->addAction(home);
         file->addAction(components);
         file->addAction(import);
+        file->addAction(importWorkspace);
+        file->addAction(exportWorkspace);
         file->addSeparator();
         file->addAction(quit);
 
         auto *edit = m_appMenuBar->addMenu(tr("编辑"));
         edit->addAction(reset);
         edit->addAction(resetAll);
+        edit->addSeparator();
+        edit->addAction(toggleCanvasLock);
+        edit->addAction(resetCanvas);
 
         auto *viewBar = m_appMenuBar->addMenu(tr("视图"));
         viewBar->addAction(m_inspectorDock->toggleViewAction());
@@ -1630,7 +1662,11 @@ void MainWindow::buildMenu()
 
         auto *tools = m_appMenuBar->addMenu(tr("工具"));
         tools->addAction(import);
+        tools->addAction(importWorkspace);
+        tools->addAction(exportWorkspace);
         tools->addAction(reset);
+        tools->addAction(toggleCanvasLock);
+        tools->addAction(resetCanvas);
         tools->addSeparator();
         tools->addAction(close);
         tools->addAction(unload);
@@ -1670,7 +1706,7 @@ void MainWindow::importComponent()
 {
     const QString source = QFileDialog::getOpenFileName(
         this, tr("导入 Serein Scope 插件"), componentPackageStartPath(),
-        tr("Serein 插件 (*.sscomponent);;动态插件 (*.dll *.so *.dylib);;所有文件 (*)"));
+        tr("Serein 插件 (*.sscomponent);;组件压缩包 (*.zip);;动态插件 (*.dll *.so *.dylib);;所有文件 (*)"));
     if (source.isEmpty()) return;
     QString error;
     const QString id = m_components->importPackage(source, &error);
@@ -1682,6 +1718,194 @@ void MainWindow::importComponent()
                          QFileInfo(source).absolutePath());
     activatePage(ComponentsId);
     setStatus(tr("插件包已安装 · 点击“加载插件”后才会进入内存"));
+}
+
+void MainWindow::exportWorkspaceDocument()
+{
+    QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
+    auto *canvas = workspace ? workspace->findChild<WorkspaceCanvas *>() : nullptr;
+    if (!canvas) {
+        QMessageBox::information(this, tr("无法导出工作台"),
+                                 tr("当前工作区没有可保存的组件画布。"));
+        return;
+    }
+    QString path = QFileDialog::getSaveFileName(
+        this, tr("导出工作台"),
+        QSettings().value(LastWorkspaceDirectoryKey,
+                          QStandardPaths::writableLocation(
+                              QStandardPaths::DocumentsLocation)).toString(),
+        tr("Serein 工作台 (*.ssworkspace.json);;JSON 文件 (*.json)"));
+    if (path.isEmpty()) return;
+    if (QFileInfo(path).suffix().compare(QStringLiteral("json"), Qt::CaseInsensitive) != 0) {
+        path += QStringLiteral(".ssworkspace.json");
+    }
+    WorkspaceDocument document = canvas->document();
+    if (m_pageTitle && !m_pageTitle->text().trimmed().isEmpty()) {
+        document.setTitle(m_pageTitle->text().trimmed());
+    }
+    QString error;
+    if (!document.saveToFileAtomic(path, &error)) {
+        QMessageBox::warning(this, tr("导出工作台失败"), error);
+        return;
+    }
+    QSettings().setValue(LastWorkspaceDirectoryKey, QFileInfo(path).absolutePath());
+    log(QStringLiteral("info"), tr("工作台已导出：%1").arg(path));
+    setStatus(tr("工作台导出完成"));
+}
+
+bool MainWindow::applyWorkspaceDocument(const WorkspaceDocument &document,
+                                        QString *error)
+{
+    QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
+    auto *canvas = workspace ? workspace->findChild<WorkspaceCanvas *>() : nullptr;
+    if (!canvas) {
+        if (error) *error = tr("当前工作区没有可应用的组件画布");
+        return false;
+    }
+    if (!document.validate(error) || document.pages().size() != 1) {
+        if (error && error->isEmpty()) *error = tr("工作台必须包含一个页面");
+        return false;
+    }
+    const WorkspaceDocumentPage &page = document.pages().first();
+    if (!page.components.isEmpty()) {
+        const bool locked = page.components.first().locked;
+        int maximizedCount = 0;
+        for (const WorkspaceComponentInstance &instance : page.components) {
+            if (instance.locked != locked) {
+                if (error) *error = tr("当前画布只支持统一的锁定状态");
+                return false;
+            }
+            if (instance.maximized) ++maximizedCount;
+        }
+        if (maximizedCount > 1) {
+            if (error) *error = tr("工作台最多只能有一个全屏组件");
+            return false;
+        }
+    }
+    struct Pending {
+        WorkspaceComponentInstance instance;
+        QWidget *content = nullptr;
+        WorkspaceComponentDefinition definition;
+        bool replacePlaceholder = false;
+    };
+    QList<Pending> pending;
+    for (const WorkspaceComponentInstance &instance : page.components) {
+        QWidget *existingContent = canvas->componentContentByInstance(instance.instanceId);
+        const bool existingPlaceholder = existingContent
+            && existingContent->objectName() == QStringLiteral("missingComponentPlaceholder");
+        if (existingContent && !(existingPlaceholder
+                                 && m_componentRegistry.contains(instance.definitionId))) {
+            continue;
+        }
+        QWidget *content = nullptr;
+        WorkspaceComponentDefinition definition;
+        if (m_componentRegistry.contains(instance.definitionId)) {
+            definition = m_componentRegistry.definition(instance.definitionId);
+            QString createError;
+            content = m_componentRegistry.createComponent(instance.definitionId,
+                                                            canvas, &createError);
+            if (!content) {
+                if (error) *error = tr("组件 %1 创建失败：%2")
+                    .arg(instance.definitionId, createError);
+                for (const Pending &item : pending) if (item.content) item.content->deleteLater();
+                return false;
+            }
+        } else {
+            auto *placeholder = new QFrame(canvas);
+            placeholder->setObjectName(QStringLiteral("missingComponentPlaceholder"));
+            auto *layout = new QVBoxLayout(placeholder);
+            layout->setContentsMargins(18, 18, 18, 18);
+            auto *title = new QLabel(tr("组件不可用"), placeholder);
+            title->setObjectName(QStringLiteral("missingComponentTitle"));
+            auto *detail = new QLabel(
+                tr("缺少定义：%1\n安装对应插件后可恢复此组件。")
+                    .arg(instance.definitionId), placeholder);
+            detail->setObjectName(QStringLiteral("missingComponentDetails"));
+            detail->setWordWrap(true);
+            layout->addWidget(title);
+            layout->addWidget(detail);
+            layout->addStretch(1);
+            content = placeholder;
+            definition.definitionId = instance.definitionId;
+            definition.displayName = tr("缺失组件 · %1").arg(instance.definitionId);
+            definition.defaultSize = QSize(360, 220);
+            definition.minimumSize = QSize(220, 140);
+        }
+        pending.append({instance, content, definition, existingPlaceholder});
+    }
+    for (const Pending &item : std::as_const(pending)) {
+        if (item.replacePlaceholder) {
+            canvas->removeComponentInstance(item.instance.instanceId);
+        }
+        if (!canvas->addComponentInstance(item.instance.definitionId,
+                                          item.instance.instanceId,
+                                          item.definition.displayName,
+                                          item.content,
+                                          item.instance.normalizedGeometry,
+                                          item.definition.minimumSize)) {
+            if (error) *error = tr("无法创建组件实例：%1")
+                .arg(item.instance.definitionId);
+            return false;
+        }
+    }
+    return canvas->applyDocument(document, error);
+}
+
+void MainWindow::importWorkspaceDocument()
+{
+    QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
+    if (!workspace || !workspace->findChild<WorkspaceCanvas *>()) {
+        QMessageBox::information(this, tr("无法导入工作台"),
+                                 tr("当前工作区没有可应用的组件画布。"));
+        return;
+    }
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("导入工作台"),
+        QSettings().value(LastWorkspaceDirectoryKey,
+                          QStandardPaths::writableLocation(
+                              QStandardPaths::DocumentsLocation)).toString(),
+        tr("Serein 工作台 (*.ssworkspace.json *.json);;所有文件 (*)"));
+    if (path.isEmpty()) return;
+    QString error;
+    const auto document = WorkspaceDocument::fromFile(path, &error);
+    if (!document) {
+        QMessageBox::warning(this, tr("导入工作台失败"), error);
+        return;
+    }
+    synchronizeComponentRegistry();
+    if (!applyWorkspaceDocument(*document, &error)) {
+        QMessageBox::warning(this, tr("导入工作台失败"), error);
+        return;
+    }
+    QSettings().setValue(LastWorkspaceDirectoryKey, QFileInfo(path).absolutePath());
+    synchronizeContextPanels();
+    log(QStringLiteral("info"), tr("工作台已导入：%1").arg(path));
+    setStatus(tr("工作台导入完成"));
+}
+
+void MainWindow::toggleCanvasEditLocked()
+{
+    QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
+    auto *canvas = workspace ? workspace->findChild<WorkspaceCanvas *>() : nullptr;
+    if (!canvas) {
+        setStatus(tr("当前工作区没有组件画布"));
+        return;
+    }
+    canvas->setEditLocked(!canvas->editLocked());
+    setStatus(canvas->editLocked() ? tr("组件布局已锁定")
+                                   : tr("组件布局已解锁 · 可移动和缩放"));
+}
+
+void MainWindow::resetCanvasLayout()
+{
+    QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
+    auto *canvas = workspace ? workspace->findChild<WorkspaceCanvas *>() : nullptr;
+    if (!canvas) {
+        setStatus(tr("当前工作区没有组件画布"));
+        return;
+    }
+    canvas->resetLayout();
+    setStatus(tr("当前组件画布已恢复默认模板"));
 }
 
 void MainWindow::refreshComponentUi()
@@ -1927,6 +2151,28 @@ void MainWindow::activateComponent(const QString &componentId,
                     createRegisteredComponentAt(id, position);
                 }
             });
+            connect(canvas, &WorkspaceCanvas::componentSelectionChanged, this,
+                    [this, workspace](const QString &) {
+                if (m_stack && m_stack->currentWidget() == workspace) {
+                    synchronizeGenericInspector();
+                }
+            });
+            connect(canvas, &WorkspaceCanvas::componentStateChanged, this,
+                    [this, workspace, canvas](
+                        const WorkspaceComponentInstance &instance) {
+                if (!m_componentRegistry.contains(instance.definitionId)) return;
+                auto *adapter = qobject_cast<IWorkspaceComponentStateAdapter *>(
+                    workspace);
+                if (!adapter) return;
+                QWidget *content = canvas->componentContentByInstance(instance.instanceId);
+                if (!content) return;
+                QString error;
+                if (!adapter->applyComponentState(content, instance, &error)
+                    && !error.isEmpty()) {
+                    log(QStringLiteral("warning"),
+                        tr("组件运行状态未应用：%1").arg(error));
+                }
+            });
         }
         if (m_sleepButton && m_sleepButton->isChecked()) applyDarkMode(true);
         log(QStringLiteral("info"), tr("已创建设备工作区：%1").arg(component.metadata.name));
@@ -2107,6 +2353,7 @@ void MainWindow::resetDockLayout()
     const QString context = currentPageLayoutContext();
     if (context.isEmpty()) {
         applyDefaultDockLayout();
+        applyWorkspacePanelDockSides();
         log(QStringLiteral("info"), tr("已恢复宿主默认面板布局"));
         return;
     }
@@ -2117,6 +2364,7 @@ void MainWindow::resetDockLayout()
     m_centerWorkbenchWindow->addDockWidget(Qt::BottomDockWidgetArea, m_outputDock);
     m_workbenchWindow->addDockWidget(Qt::LeftDockWidgetArea, m_inspectorDock);
     m_applyingPageLayout = false;
+    applyWorkspacePanelDockSides();
     m_pageLayoutContext = context;
     applyPageLayout(context, defaultPageLayout(context));
     log(QStringLiteral("info"), tr("已恢复当前页面默认布局：%1").arg(context));
@@ -2142,6 +2390,7 @@ void MainWindow::resetAllDockLayouts()
     settings.remove(CentralDockSettingsKey);
     m_applyingPageLayout = true;
     applyDefaultDockLayout();
+    applyWorkspacePanelDockSides();
     m_applyingPageLayout = false;
     m_pageLayoutContext = currentPageLayoutContext();
     if (!m_pageLayoutContext.isEmpty()) {
@@ -2159,7 +2408,8 @@ void MainWindow::refreshComponentLibrary()
         m_componentRegistry.definitions();
     QSet<QString> registeredIds;
     for (const WorkspaceComponentDefinition &definition : definitions) {
-        auto *item = new QListWidgetItem(QIcon(definition.iconSource), QString(),
+        auto *item = new QListWidgetItem(QIcon(definition.iconSource),
+                                         definition.displayName,
                                          m_componentLibraryList);
         item->setData(Qt::UserRole, definition.definitionId);
         item->setToolTip(tr("%1\n拖动到中央工作区添加")
@@ -2173,7 +2423,7 @@ void MainWindow::refreshComponentLibrary()
         ? provider->context().componentLibrary : WorkspaceLibraryPresentation{};
     for (const WorkspaceLibraryItem &entry : library.items) {
         if (registeredIds.contains(entry.id)) continue;
-        auto *item = new QListWidgetItem(QIcon(entry.iconSource), QString(),
+        auto *item = new QListWidgetItem(QIcon(entry.iconSource), entry.title,
                                          m_componentLibraryList);
         item->setData(Qt::UserRole, entry.id);
         item->setToolTip(tr("%1\n拖动到中央工作区添加").arg(entry.title));
@@ -2186,15 +2436,14 @@ void MainWindow::synchronizeComponentRegistry()
     m_componentRegistry.clear();
     QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
     auto *provider = workspace
-        ? qobject_cast<IWorkspaceComponentProvider *>(workspace) : nullptr;
+        ? dynamic_cast<IWorkspaceComponentProvider *>(workspace) : nullptr;
     if (!provider) return;
 
     QString error;
-    // The registry is scoped to the active workspace and cleared before each
-    // refresh. The workspace itself remains owned by m_workspaces, so no
-    // extra destroyed callback is needed here (and repeated refreshes cannot
-    // accumulate callbacks for the same provider address).
-    if (!m_componentRegistry.registerProvider(provider, nullptr, &error)) {
+    // Track the workspace QObject so definitions are invalidated before a
+    // plugin DLL can unload. The registry is still cleared on every context
+    // refresh, keeping providers scoped to the active workspace.
+    if (!m_componentRegistry.registerProvider(provider, workspace, &error)) {
         log(QStringLiteral("warning"),
             tr("忽略工作区组件定义：%1").arg(error));
     }
@@ -2210,20 +2459,23 @@ bool MainWindow::createRegisteredComponentAt(const QString &componentId,
     auto *canvas = workspace ? workspace->findChild<WorkspaceCanvas *>() : nullptr;
     if (!canvas) return false;
 
-    // New component providers are activated through the registry. Existing
-    // canvas instances are reused (important for a live device session); a
-    // factory is called only when the definition has not already been added
-    // to the current canvas.
+    // A provider may ship one hidden default instance as its empty-workbench
+    // template. Reveal that instance first; later activations clone by UUID.
+    if (ComponentFrame *existing = canvas->componentFrame(componentId);
+        existing && !canvas->isComponentVisible(existing->componentId())) {
+        return canvas->addOrShowComponentAt(existing->componentId(), position);
+    }
+
+    // Every library activation creates a fresh instance. Existing instances
+    // remain untouched so users can compare two bindings or views side by
+    // side; the legacy addOrShowComponentAt API is kept for old plugins.
     bool added = false;
-    if (canvas->componentFrame(componentId)) {
-        added = canvas->addOrShowComponentAt(componentId);
-    } else {
-        const WorkspaceComponentDefinition definition =
-            m_componentRegistry.definition(componentId);
-        QString error;
-        QWidget *content = m_componentRegistry.createComponent(
-            componentId, canvas, &error);
-        if (content) {
+    const WorkspaceComponentDefinition definition =
+        m_componentRegistry.definition(componentId);
+    QString error;
+    QWidget *content = m_componentRegistry.createComponent(
+        componentId, canvas, &error);
+    if (content) {
             QRectF geometry(0.08, 0.08, 0.84, 0.60);
             if (canvas->width() > 0 && canvas->height() > 0) {
                 const qreal width = std::clamp(
@@ -2241,14 +2493,35 @@ bool MainWindow::createRegisteredComponentAt(const QString &componentId,
                     std::clamp((target.y() / qreal(canvas->height())) - height / 2.0,
                                0.0, 1.0 - height), width, height);
             }
-            added = canvas->addComponent(
-                definition.definitionId, definition.displayName, content,
-                geometry, definition.minimumSize) != nullptr;
-            if (!added) content->deleteLater();
-        } else {
-            log(QStringLiteral("warning"),
-                tr("组件创建失败：%1").arg(error));
-        }
+            ComponentFrame *createdFrame = canvas->addComponentInstance(
+                definition.definitionId, QUuid::createUuid(),
+                definition.displayName, content, geometry,
+                definition.minimumSize);
+            added = createdFrame != nullptr;
+            if (added) {
+                const QString instanceKey = createdFrame->componentId();
+                WorkspaceComponentInstance instance =
+                    canvas->componentInstance(instanceKey);
+                for (const WorkspaceComponentProperty &property
+                     : definition.properties) {
+                    if (!instance.properties.contains(property.key)) {
+                        instance.properties.insert(property.key,
+                                                   property.defaultValue);
+                    }
+                }
+                QString stateError;
+                if (!canvas->updateComponentInstance(instance, &stateError)) {
+                    log(QStringLiteral("warning"),
+                        tr("组件默认状态未应用：%1").arg(stateError));
+                }
+                // Select newly created instances so the host Inspector can
+                // immediately expose the definition's schema and bindings.
+                canvas->addOrShowComponentAt(instanceKey, position);
+            }
+        if (!added) content->deleteLater();
+    } else {
+        log(QStringLiteral("warning"),
+            tr("组件创建失败：%1").arg(error));
     }
     if (added) {
         return true;
@@ -2285,6 +2558,30 @@ void MainWindow::showLibraryComponent(const QString &componentId)
     log(QStringLiteral("warning"), tr("当前工作区不支持组件：%1").arg(componentId));
 }
 
+void MainWindow::beginComponentPlacement(const QString &componentId)
+{
+    if (componentId.trimmed().isEmpty()) return;
+
+    // Host-registered components keep the default add-on activation, so they
+    // are not regressed by the canvas placing workflow.
+    if (m_componentRegistry.contains(componentId)) {
+        showLibraryComponent(componentId);
+        return;
+    }
+
+    WorkspaceUiProvider *provider = activeWorkspaceUiProvider();
+    const WorkspaceLibraryPresentation library = provider
+        ? provider->context().componentLibrary : WorkspaceLibraryPresentation{};
+    const bool invoked = library.activationTarget
+        && QMetaObject::invokeMethod(
+            library.activationTarget, QByteArrayLiteral("beginLibraryComponentPlacement"),
+            Qt::DirectConnection, Q_ARG(QString, componentId));
+    if (invoked) return;
+
+    // Fall back to the previous single activation behaviour.
+    showLibraryComponent(componentId);
+}
+
 WorkspaceUiProvider *MainWindow::activeWorkspaceUiProvider() const
 {
     QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
@@ -2310,6 +2607,9 @@ void MainWindow::detachPanelHeaderControl(
             if (auto *layout = qobject_cast<QBoxLayout *>(header->layout())) {
                 layout->removeWidget(attachment.control);
             }
+            attachment.control->setProperty("workspacePanelHeaderControl", false);
+            attachment.control->style()->unpolish(attachment.control);
+            attachment.control->style()->polish(attachment.control);
         }
         if (auto *title = header->findChild<QLabel *>(QStringLiteral("dockTitle"))) {
             title->show();
@@ -2363,6 +2663,9 @@ void MainWindow::synchronizePanelHeaderControl(
     attachment.control = control;
     attachment.owner = owner;
     attachment.layoutIndex = ownerIndex;
+    control->setProperty("workspacePanelHeaderControl", true);
+    control->style()->unpolish(control);
+    control->style()->polish(control);
     if (dock->isFloating()) return;
 
     ownerLayout->removeWidget(control);
@@ -2423,6 +2726,72 @@ void MainWindow::detachWorkspacePanels()
     if (m_outputTrendEmpty) m_outputTrendEmpty->show();
 }
 
+void MainWindow::synchronizeGenericInspector()
+{
+    if (!m_genericInspector || !m_inspectorContributionHost
+        || !m_inspectorContributionLayout) {
+        return;
+    }
+    WorkspaceUiProvider *provider = activeWorkspaceUiProvider();
+    const WorkspaceUiContext context = provider ? provider->context()
+                                                : WorkspaceUiContext{};
+    if (context.inspectorPanel.content) {
+        m_genericInspector->hide();
+        return;
+    }
+
+    QWidget *workspace = m_stack ? m_stack->currentWidget() : nullptr;
+    auto *canvas = workspace ? workspace->findChild<WorkspaceCanvas *>() : nullptr;
+    const QString selectedId = canvas ? canvas->selectedComponentId() : QString{};
+    const WorkspaceComponentInstance selectedInstance = canvas
+        ? canvas->componentInstance(selectedId) : WorkspaceComponentInstance{};
+    if (!canvas || selectedId.isEmpty()
+        || !m_componentRegistry.contains(selectedInstance.definitionId)) {
+        if (m_attachedInspectorPanel == m_genericInspector) {
+            m_inspectorContributionLayout->removeWidget(m_genericInspector);
+            m_genericInspector->hide();
+            m_genericInspector->setParent(m_inspectorContributionHost);
+            m_attachedInspectorPanel.clear();
+            m_attachedInspectorPanelOwner.clear();
+        }
+        if (m_inspectorContributionHost) m_inspectorContributionHost->hide();
+        for (QWidget *generic : {static_cast<QWidget *>(m_inspectorName),
+                                 static_cast<QWidget *>(m_inspectorDescription),
+                                 static_cast<QWidget *>(m_inspectorMeta),
+                                 static_cast<QWidget *>(m_inspectorCapabilities)}) {
+            if (generic) generic->show();
+        }
+        if (m_inspectorBodyLayout) {
+            m_inspectorBodyLayout->setContentsMargins(12, 10, 12, 12);
+            m_inspectorBodyLayout->setSpacing(8);
+        }
+        return;
+    }
+
+    const WorkspaceComponentDefinition definition =
+        m_componentRegistry.definition(selectedInstance.definitionId);
+    const WorkspaceComponentInstance instance = selectedInstance;
+    m_genericInspector->setState(definition, instance);
+    if (m_attachedInspectorPanel != m_genericInspector) {
+        m_genericInspector->setParent(m_inspectorContributionHost);
+        m_inspectorContributionLayout->addWidget(m_genericInspector, 1);
+        m_attachedInspectorPanel = m_genericInspector;
+        m_attachedInspectorPanelOwner = m_inspectorContributionHost;
+    }
+    m_genericInspector->show();
+    m_inspectorContributionHost->show();
+    for (QWidget *generic : {static_cast<QWidget *>(m_inspectorName),
+                             static_cast<QWidget *>(m_inspectorDescription),
+                             static_cast<QWidget *>(m_inspectorMeta),
+                             static_cast<QWidget *>(m_inspectorCapabilities)}) {
+        if (generic) generic->hide();
+    }
+    if (m_inspectorBodyLayout) {
+        m_inspectorBodyLayout->setContentsMargins(0, 0, 0, 0);
+        m_inspectorBodyLayout->setSpacing(0);
+    }
+}
+
 void MainWindow::synchronizeContextPanels()
 {
     synchronizeComponentRegistry();
@@ -2439,6 +2808,7 @@ void MainWindow::synchronizeContextPanels()
         }
     }
     m_activeUiProvider = provider;
+    applyWorkspacePanelDockSides();
 
     const WorkspaceUiContext context = provider ? provider->context()
                                                  : WorkspaceUiContext{};
@@ -2491,7 +2861,11 @@ void MainWindow::synchronizeContextPanels()
     setDockTitle(m_navigationDock,
                  hasContext && !context.contextPanel.title.isEmpty()
                      ? context.contextPanel.title : tr("设备连接"));
-
+    if (m_navigationToggle) {
+        m_navigationToggle->setToolTip(
+            hasContext && !context.contextPanel.title.isEmpty()
+                ? context.contextPanel.title : tr("设备连接面板"));
+    }
     const bool hasInspector = attach(context.inspectorPanel,
                                      presentationOptions.inspectorPanel,
                                      WorkspacePanelSlot::Inspector,
@@ -2499,6 +2873,11 @@ void MainWindow::synchronizeContextPanels()
                                      m_inspectorContributionLayout,
                                      m_attachedInspectorPanel,
                                      m_attachedInspectorPanelOwner);
+    if (m_inspectorToggle) {
+        m_inspectorToggle->setToolTip(
+            hasInspector && !context.inspectorPanel.title.isEmpty()
+                ? context.inspectorPanel.title : tr("数据与属性面板"));
+    }
     if (m_inspectorBodyLayout) {
         m_inspectorBodyLayout->setContentsMargins(hasInspector ? 0 : 12,
                                                    hasInspector ? 0 : 10,
@@ -2541,7 +2920,37 @@ void MainWindow::synchronizeContextPanels()
                                              : tr("清空终端输出"));
     }
     if (m_outputToggle) m_outputToggle->setToolTip(outputTitle);
+    synchronizeGenericInspector();
     refreshComponentLibrary();
+}
+
+void MainWindow::applyWorkspacePanelDockSides()
+{
+    if (!m_workbenchWindow || !m_navigationDock || !m_inspectorDock) return;
+
+    WorkspaceUiProvider *provider = m_activeUiProvider;
+    const WorkspacePanelSide contextSide = provider
+        ? provider->panelSide(WorkspacePanelSlot::Context)
+        : WorkspacePanelSide::Default;
+    const WorkspacePanelSide inspectorSide = provider
+        ? provider->panelSide(WorkspacePanelSlot::Inspector)
+        : WorkspacePanelSide::Default;
+    const Qt::DockWidgetArea contextArea = contextSide == WorkspacePanelSide::Left
+        ? Qt::LeftDockWidgetArea : Qt::RightDockWidgetArea;
+    const Qt::DockWidgetArea inspectorArea = inspectorSide == WorkspacePanelSide::Right
+        ? Qt::RightDockWidgetArea : Qt::LeftDockWidgetArea;
+
+    const bool applying = m_applyingPageLayout;
+    m_applyingPageLayout = true;
+    if (!m_navigationDock->isFloating()
+        && m_workbenchWindow->dockWidgetArea(m_navigationDock) != contextArea) {
+        m_workbenchWindow->addDockWidget(contextArea, m_navigationDock);
+    }
+    if (!m_inspectorDock->isFloating()
+        && m_workbenchWindow->dockWidgetArea(m_inspectorDock) != inspectorArea) {
+        m_workbenchWindow->addDockWidget(inspectorArea, m_inspectorDock);
+    }
+    m_applyingPageLayout = applying;
 }
 
 void MainWindow::toggleDarkMode()
@@ -2619,6 +3028,8 @@ MainWindow::PageLayoutPreset MainWindow::defaultPageLayout(
         return {0.55, true, true, SidePanelDefaultWidth};
     case WorkspaceLayoutProfile::Standard:
         return {0.40, true, false, SidePanelDefaultWidth};
+    case WorkspaceLayoutProfile::Authoring:
+        return {0.40, true, true, SidePanelDefaultWidth};
     }
     return {};
 }
@@ -2862,8 +3273,33 @@ void MainWindow::resizeEvent(QResizeEvent *event)
 #endif
 }
 
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    QMainWindow::closeEvent(event);
+    if (event->isAccepted()) {
+        QCoreApplication::quit();
+    }
+}
+
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    if (watched == m_outputDock && event->type() == QEvent::Resize
+        && m_pageLayoutsReady && !m_applyingPageLayout
+        && !m_pageLayoutContext.isEmpty() && m_outputDock
+        && !m_outputDock->isHidden() && !m_outputDock->isFloating()) {
+        const QString context = m_pageLayoutContext;
+        const quint64 revision = ++m_outputResizeSaveRevision;
+        QTimer::singleShot(160, this, [this, context, revision] {
+            if (revision != m_outputResizeSaveRevision
+                || context != m_pageLayoutContext || m_applyingPageLayout
+                || !m_outputDock || m_outputDock->isHidden()
+                || m_outputDock->isFloating()) {
+                return;
+            }
+            savePageLayout(context);
+        });
+    }
+
     auto *widget = qobject_cast<QWidget *>(watched);
     if (!widget || (widget != this && !isAncestorOf(widget))) {
         return QMainWindow::eventFilter(watched, event);
