@@ -6,6 +6,8 @@
 
 #include <serein/scope/WorkspaceCanvas.h>
 
+#include <serein/scope/AppPaths.h>
+
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QDateTime>
 #include <QtCore/QDir>
@@ -1873,8 +1875,7 @@ bool ProductionCalibrationPage::ensureSessionDirectory(QString *error)
         return false;
     }
     if (!m_sessionPath.isEmpty()) return true;
-    const QString rootPath = QStandardPaths::writableLocation(
-        QStandardPaths::AppLocalDataLocation);
+    const QString rootPath = serein::scope::AppPaths::dataRoot();
     if (rootPath.isEmpty()) {
         if (error) *error = tr("系统没有可用的应用数据目录");
         return false;

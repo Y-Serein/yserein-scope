@@ -67,8 +67,8 @@ void UDPWinSender::stop()
     _worker->stop();
 
     _workerThread->quit();
-    if ( !_workerThread->wait() ) {
-        zWarning(UDPWinSenderLog) << "failed to wait udp sender to close";
+    if ( !_workerThread->wait(3000) ) {
+        zWarning(UDPWinSenderLog) << "failed to wait udp sender to close within 3s";
     }
 
     if (_socket != INVALID_SOCKET)

@@ -62,12 +62,6 @@ Rectangle {
                 Layout.fillWidth: true
                 checkable: true
             }
-
-            MiddleSidebarButton {
-                text: qsTr("运行诊断")
-                Layout.fillWidth: true
-                checkable: true
-            }
         }
 
         Item { Layout.fillHeight: true }

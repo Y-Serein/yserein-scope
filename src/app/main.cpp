@@ -2,6 +2,7 @@
 #include "QuickWorkbenchController.h"
 #include "Theme.h"
 
+#include <serein/scope/AppPaths.h>
 #include <serein/scope/BackendRuntime.h>
 
 #include <QtCore/QCoreApplication>
@@ -25,6 +26,12 @@ int main(int argc, char *argv[])
     QCoreApplication::setOrganizationName(QStringLiteral("Serein"));
     QApplication::setStyle(QStringLiteral("Fusion"));
     serein::scope::app::applyTheme(application);
+
+    // 便携式安装：QSettings 默认落盘到 exe 目录 /runtime/config，随安装目录整体迁移，
+    // 不写入用户 AppData。测试/QA 隔离模式随后仍会用临时目录覆盖。
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
+                       serein::scope::AppPaths::configDir());
 
     QString screenshotPath;
     QString componentCycleId;
@@ -59,7 +66,6 @@ int main(int argc, char *argv[])
             qCritical() << "无法创建测试设置隔离目录";
             return 3;
         }
-        QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
                            testSettingsDirectory->path());
     }

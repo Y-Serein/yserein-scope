@@ -85,7 +85,19 @@ void ZSMBackend::stopBackend()
 {
 	zInfo(ZSMBackendLog) << "stopping";
 
+	// 停止全部定时器，确保后端线程没有遗留的周期任务
 	_back2HzTimer->stop();
+	_back10HzTimer->stop();
+	_back500HzTimer->stop();
+
+	// 彻底清理后端资源，顺序不能乱：
+	//   1) 先切断 MavlinkDistributor 对 worker 的引用，避免悬空指针；
+	//   2) 再停掉并释放全部 mock 车 worker 线程（shutdown 会触发池析构）；
+	//   3) 最后停掉 UDP 收发链路（接收线程 + 发送 worker 线程）。
+	// 三者都必须在 backend 线程内执行，且各自带有限时等待。
+	MavlinkDistributor::instance()->clear();
+	MockVehicleManager::instance()->shutdown();
+	LinkManager::instance()->stop();
 
 	emit backStopped();
 }

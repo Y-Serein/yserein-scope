@@ -37,6 +37,12 @@ void MavlinkDistributor::init()
     connect(zsmApp(), &ZSMBackend::back10HzSignal,this, &MavlinkDistributor::_10HzLoop);
 }
 
+void MavlinkDistributor::clear()
+{
+    _vehicleWorkerMap.clear();
+    _vehicleWorkerSet.clear();
+}
+
 void MavlinkDistributor::enqueueMsg(QByteArray &data)
 {
     _msgQueue.enqueue(data);

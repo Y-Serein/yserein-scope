@@ -1,4 +1,5 @@
 add_library(serein_scope_core SHARED
+    include/serein/scope/AppPaths.h
     include/serein/scope/BufferedDecoder.h
     include/serein/scope/BackendIoTaskGroup.h
     include/serein/scope/BackendRuntime.h
@@ -15,6 +16,7 @@ add_library(serein_scope_core SHARED
     include/serein/scope/WorkspaceDocument.h
     include/serein/scope/ChannelRegistry.h
     include/serein/scope/WorkspaceComponentInspector.h
+    src/AppPaths.cpp
     src/BufferedDecoder.cpp
     src/BackendIoTaskGroup.cpp
     src/BackendRuntime.cpp

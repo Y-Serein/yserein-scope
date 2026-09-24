@@ -50,8 +50,8 @@ UDPWinLink::~UDPWinLink()
 
     _sender->stop();
 
-    if ( !_recvThread->wait() ) {
-        zWarning(UDPWinLinkLog) << "failed to wait udp receive thread to close";
+    if ( !_recvThread->wait(3000) ) {
+        zWarning(UDPWinLinkLog) << "failed to wait udp receive thread to close within 3s";
     }
 
     // _sendThread->quit();

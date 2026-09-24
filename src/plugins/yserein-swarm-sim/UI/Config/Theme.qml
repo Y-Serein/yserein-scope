@@ -3,7 +3,10 @@ pragma Singleton
 import QtQuick
 
 QtObject{
-    property QtObject nowTheme: lightMode
+    // 由宿主注入的深色开关（C++ context property：swarmDarkMode）。
+    // 跟随 Scope 宿主主题切换，而不是组件自身写死浅色。
+    property bool dark: typeof swarmDarkMode !== "undefined" && swarmDarkMode
+    property QtObject nowTheme: dark ? darkMode : lightMode
     //property QtObject colors: currentTheme.colors
 
     property QtObject colors : QtObject {

@@ -36,8 +36,18 @@ QWidget* SwarmSimPlugin::createWorkspace(QWidget* parent)
 
 bool SwarmSimPlugin::canUnload() const
 {
-	// 模拟器持有跨线程后端与 Q_APPLICATION_STATIC 控制器单例，暂不支持真实 DLL 卸载。
-	return m_workspace.isNull();
+    // 该组件持有跨线程后端（UDP 收发线程、每个 mock 车一个 worker 线程），
+    // 并通过多个 Q_APPLICATION_STATIC 控制器单例（ZSMBackend/LinkManager/
+    // MockVehicleManager/MavlinkDistributor 等）共享全局状态。这些单例的
+    // 生命周期绑定宿主 QCoreApplication，宿主无法在 QLibrary::unload 前
+    // 显式销毁它们；一旦 DLL 被卸载，单例对象及其指向的 vtable/析构代码
+    // 仍在已卸载模块内，任何后续访问（包括程序退出时的静态析构）都会
+    // 触发访问已卸载 DLL 代码的崩溃。
+    //
+    // 在彻底重构为显式生命周期管理之前，禁止真实卸载：宁可明确拒绝，
+    // 也不允许点击卸载后进程崩溃。关闭工作区请使用工作区关闭，它将
+    // 走资源清理路径停掉所有后台线程。
+    return false;
 }
 
 void SwarmSimPlugin::shutdown()

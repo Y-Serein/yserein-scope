@@ -3,6 +3,8 @@
 #include <QtCore/QObject>
 #include <QtCore/QTimer>
 #include <QtCore/QThread>
+#include <QtCore/QList>
+#include <QtCore/QString>
 #include <functional>
 
 #include "concurrentqueue.h"
@@ -38,8 +40,10 @@ public:
 	// 供后端线程投递前端任务
 	void addTask(std::function<void()> func);
 
-	// 供 workspace 绑定 QML 视图
+	// 供 workspace 绑定 QML 视图（中央主场景）
 	void setView(QQuickView* view);
+	// 供 workspace 绑定宿主面板视图（左/右/下 dock）
+	void addPanelView(QQuickView* view, const QString &uri, const QString &type);
 
 public slots:
 	// 后端 setupBackend 完成后被调用（从后端线程 queued 到主线程）
@@ -69,6 +73,15 @@ private:
 	QThread* _backendThread = nullptr;
 
 	QQuickView* _view = nullptr;
+
+	// 宿主面板视图（左/右/下 dock）
+	struct PanelView {
+		QQuickView* view = nullptr;
+		QString uri;
+		QString type;
+	};
+	QList<PanelView> _panelViews;
+
 	bool _qmlTypesRegistered = false;
 
 	moodycamel::ConcurrentQueue<std::function<void()>> _taskQueue;

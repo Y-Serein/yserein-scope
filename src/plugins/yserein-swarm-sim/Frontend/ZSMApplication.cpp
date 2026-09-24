@@ -10,6 +10,9 @@
 #include <QtQuick/QQuickView>
 #include <QtCore/QCoreApplication>
 #include <QtCore/QEventLoop>
+#include <QtCore/QFile>
+#include <QtCore/QStandardPaths>
+#include <QtCore/QTextStream>
 #include <QtCore/QSettings>
 #include "MavlinkProtocol.h"
 
@@ -73,7 +76,12 @@ void ZSMApplication::stopAll()
 		loop.exec();
 
 		_backendThread->quit();
-		_backendThread->wait();
+		// 请求中断并给后端线程一个有限的退出窗口；超时则放弃等待，
+		// 避免主线程在关闭流程中无限阻塞，导致进程退不掉
+		_backendThread->requestInterruption();
+		if (!_backendThread->wait(3000)) {
+			zWarning(ZSMApplicationLog) << "Backend thread did not stop within 3s; continuing shutdown";
+		}
 		_backendThread = nullptr;
 		_zsmBackend = nullptr;
 	}
@@ -82,6 +90,12 @@ void ZSMApplication::stopAll()
 void ZSMApplication::setView(QQuickView* view)
 {
 	_view = view;
+}
+
+void ZSMApplication::addPanelView(QQuickView* view, const QString &uri, const QString &type)
+{
+	if (!view) return;
+	_panelViews.append({view, uri, type});
 }
 
 void ZSMApplication::setupFrontend()
@@ -197,5 +211,37 @@ void ZSMApplication::_loadQml()
 {
 	if (_view) {
 		_view->loadFromModule(QStringLiteral("YSerein.SwarmSimulator"), QStringLiteral("Main"));
+	} else {
+		zWarning(ZSMApplicationLog) << "loadFromModule skipped: _view is null";
+	}
+	// 写诊断文件，方便在宿主 GUI 看不到 Qt 日志时排查。
+	// 宿主目录可能无写权限，因此在 %TEMP% 兜底写一份。
+	const auto writeDiag = [this](const QString &filePath) {
+		if (!_view) return;
+		QFile diag(filePath);
+		if (diag.open(QIODevice::WriteOnly | QIODevice::Text)) {
+			QTextStream ts(&diag);
+			ts << "loadFromModule status=" << static_cast<int>(_view->status())
+			   << " rootObject=" << (_view->rootObject() != nullptr);
+			if (_view->status() == QQuickView::Error) {
+				for (const QQmlError &err : _view->errors())
+					ts << "\nQML error: " << err.toString();
+			}
+			ts << "\n";
+			diag.close();
+		}
+	};
+	writeDiag(QCoreApplication::applicationDirPath() + QStringLiteral("/zsm_qml_diag.txt"));
+	writeDiag(QStandardPaths::writableLocation(QStandardPaths::TempLocation) + QStringLiteral("/zsm_qml_diag.txt"));
+	zInfo(ZSMApplicationLog) << "QML after loadFromModule status:" << static_cast<int>(_view->status())
+		<< "rootObject:" << (_view->rootObject() != nullptr);
+	for (const auto &pv : _panelViews) {
+		pv.view->loadFromModule(pv.uri, pv.type);
+		zInfo(ZSMApplicationLog) << "Panel QML(" << pv.uri << ") status:" << static_cast<int>(pv.view->status())
+			<< "rootObject:" << (pv.view->rootObject() != nullptr);
+	}
+	if (_view->status() == QQuickView::Error) {
+		for (const QQmlError &err : _view->errors())
+			zWarning(ZSMApplicationLog) << "QML error:" << err.toString();
 	}
 }

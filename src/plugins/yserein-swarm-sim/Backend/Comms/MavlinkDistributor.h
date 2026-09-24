@@ -25,6 +25,10 @@ public:
     static MavlinkDistributor* instance();
     void init();
 
+    /// @brief 清空对 MockVehicleWorker 的弱引用集合。
+    /// 在 shutdown 车辆池之前调用，避免残留指向已删除 worker 的悬空指针。
+    void clear();
+
     void enqueueMsg(QByteArray& data);
 
 private slots:

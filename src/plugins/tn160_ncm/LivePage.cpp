@@ -4,6 +4,8 @@
 #include "Tn160ProtocolEngines.h"
 #include "TrendWidget.h"
 
+#include <serein/scope/AppPaths.h>
+
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QDateTime>
 #include <QtCore/QDir>
@@ -115,8 +117,7 @@ QString nucDecisionLabel(const int decision)
 
 QString diagnosticExportPath(const QString &extension)
 {
-    QString rootPath = QStandardPaths::writableLocation(
-        QStandardPaths::AppLocalDataLocation);
+    QString rootPath = serein::scope::AppPaths::dataRoot();
     if (rootPath.isEmpty()) {
         rootPath = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
     }
@@ -257,8 +258,7 @@ QString saveRawCapture(const QVector<QByteArray> &frames, QString *error)
         if (error) *error = QObject::tr("没有可保存的原始帧");
         return {};
     }
-    const QString rootPath = QStandardPaths::writableLocation(
-        QStandardPaths::AppLocalDataLocation);
+    const QString rootPath = serein::scope::AppPaths::dataRoot();
     QDir root(rootPath);
     if (!root.mkpath(QStringLiteral("thermal_state_capture"))) {
         if (error) *error = QObject::tr("无法创建原始采集目录");

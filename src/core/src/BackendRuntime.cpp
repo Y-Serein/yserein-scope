@@ -401,15 +401,22 @@ void BackendRuntime::stop()
         m_impl->thread = nullptr;
     }
 
+    // 给 IO 池和 worker 线程一个有限的退出窗口，超时则放弃等待，
+    // 避免主线程在关闭流程中无限阻塞导致进程退不掉
     if (ioPool) {
-        ioPool->waitForDone();
+        ioPool->waitForDone(3000);
     }
     if (worker && thread->isRunning()) {
-        QMetaObject::invokeMethod(worker, &BackendWorker::shutdown,
-                                  Qt::BlockingQueuedConnection);
+        // 关键：不能用 BlockingQueuedConnection 同步等 shutdown() 完成，
+        // 否则 worker 卡在长任务时主线程会永久阻塞；改为非阻塞投递，
+        // 再由下方 wait(3000) 限时等待线程退出
+        QMetaObject::invokeMethod(worker, &BackendWorker::shutdown, Qt::QueuedConnection);
     }
     thread->quit();
-    thread->wait();
+    thread->requestInterruption();
+    if (!thread->wait(3000)) {
+        qWarning() << "BackendRuntime: worker thread did not stop within 3s; continuing shutdown";
+    }
     {
         QMutexLocker lock(&m_impl->mutex);
         m_impl->cachedStats.running = false;

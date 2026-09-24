@@ -31,7 +31,21 @@ MockVehicleManager* MockVehicleManager::instance()
 
 void MockVehicleManager::init()
 {
+	// 若池已被 shutdown() 释放，则重建。每次后端线程启动时会走到这里，
+	// 因此组件关闭后重新打开可以恢复一套可用的 worker 池。
+	if (!_vehiclePool) {
+		_vehiclePool = new MockVehiclePool(this);
+	}
+}
 
+void MockVehicleManager::shutdown()
+{
+	// 删除车辆池会触发池析构，逐个停掉 worker 线程并释放。
+	// 必须在 backend 线程内、且先切断其他线程对该池的引用。
+	if (_vehiclePool) {
+		delete _vehiclePool;
+		_vehiclePool = nullptr;
+	}
 }
 
 MockVehicleWorker* MockVehicleManager::getWorkerById(int id)

@@ -1,14 +1,14 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import QtQuick.Dialogs
 
 import YSerein.SwarmSimulator.Config
 
 import Frontend
-import Frontend.DroneShow
 import Frontend.Vehicle
 
+// 中央顶栏：仅保留标题、工作区名与机群状态。
+// 导入舞步 / 目标 IP / 网格配置已迁移到左侧 Context 面板。
 Rectangle {
     id: root
     color: Theme.colors.baseBackground
@@ -59,7 +59,7 @@ Rectangle {
                    ? Theme.colors.success7 : Theme.colors.lightFill
             border.width: 1
             border.color: Frontend.mockVehicleController.count > 0
-                          ? Theme.colors.success4 : Theme.colors.lightBorder
+                           ? Theme.colors.success4 : Theme.colors.lightBorder
 
             Label {
                 id: statusLabel
@@ -73,116 +73,6 @@ Rectangle {
                 font.weight: Font.Medium
             }
         }
-
-        Label {
-            text: qsTr("目标 192.168.20.251:37890")
-            color: Theme.colors.secondaryText
-            font.pixelSize: 12
-        }
-
-        Button {
-            id: loadFile
-            text: qsTr("导入舞步")
-            implicitWidth: 92
-            implicitHeight: 32
-            onClicked: fileDialog.open()
-
-            contentItem: Label {
-                text: loadFile.text
-                color: "#FFFFFF"
-                horizontalAlignment: Text.AlignHCenter
-                verticalAlignment: Text.AlignVCenter
-                font.pixelSize: 13
-                font.weight: Font.Medium
-            }
-
-            background: Rectangle {
-                radius: 6
-                color: loadFile.down ? Theme.colors.primary2
-                                      : (loadFile.hovered ? Theme.colors.primary2 : Theme.colors.primary)
-            }
-        }
-
-        RowLayout {
-            spacing: 6
-
-            Label {
-                text: qsTr("网格")
-                color: Theme.colors.regularText
-                font.pixelSize: 12
-            }
-
-            SpinBox {
-                id: gridRows
-                from: 1
-                to: 5000
-                value: 10
-                editable: true
-                implicitWidth: 84
-                implicitHeight: 30
-                textFromValue: function(value) { return value }
-                valueFromText: function(text) { return Number(text) }
-            }
-
-            Label {
-                text: "×"
-                color: Theme.colors.secondaryText
-            }
-
-            SpinBox {
-                id: gridCols
-                from: 1
-                to: 5000
-                value: 10
-                editable: true
-                implicitWidth: 84
-                implicitHeight: 30
-                textFromValue: function(value) { return value }
-                valueFromText: function(text) { return Number(text) }
-            }
-
-            Label {
-                text: qsTr("间距(m)")
-                color: Theme.colors.regularText
-                font.pixelSize: 12
-            }
-
-            SpinBox {
-                id: gridSpacing
-                from: 1
-                to: 500
-                value: 12
-                editable: true
-                implicitWidth: 84
-                implicitHeight: 30
-            }
-
-            Button {
-                id: genGrid
-                text: qsTr("一键生成")
-                implicitWidth: 92
-                implicitHeight: 32
-                onClicked: Frontend.mockVehicleController.generateGridVehicles(
-                               Number(gridRows.text),
-                               Number(gridCols.text),
-                               Number(gridSpacing.text))
-
-                contentItem: Label {
-                    text: genGrid.text
-                    color: "#FFFFFF"
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                    font.pixelSize: 13
-                    font.weight: Font.Medium
-                }
-
-                background: Rectangle {
-                    radius: 6
-                    color: genGrid.down ? Theme.colors.primary2
-                                         : (genGrid.hovered ? Theme.colors.primary2 : Theme.colors.primary)
-                }
-            }
-        }
     }
 
     Rectangle {
@@ -191,13 +81,5 @@ Rectangle {
         anchors.bottom: parent.bottom
         height: 1
         color: Theme.colors.lightBorder
-    }
-
-    FileDialog {
-        id: fileDialog
-        title: qsTr("选择舞步文件")
-        nameFilters: ["YSerein 舞步文件 (*.yds *.zds)", "所有文件 (*.*)"]
-        currentFolder: StandardPaths.standardLocations(StandardPaths.DocumentsLocation)[0]
-        onAccepted: Frontend.droneShowController.droneShowFileLoad(selectedFile)
     }
 }

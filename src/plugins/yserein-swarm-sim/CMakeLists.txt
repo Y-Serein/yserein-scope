@@ -232,6 +232,9 @@ foreach(lib
         sim_ui_settingsplugin
         sim_ui_headplugin
         sim_ui_footplugin
+        sim_ui_contextplugin
+        sim_ui_inspectorplugin
+        sim_ui_outputplugin
         sim_ui_resourcesplugin)
     target_link_libraries(serein_scope_swarm_sim PRIVATE
         "$<LINK_LIBRARY:WHOLE_ARCHIVE,${lib}>"

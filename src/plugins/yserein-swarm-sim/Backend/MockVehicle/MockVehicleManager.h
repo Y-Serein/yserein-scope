@@ -28,6 +28,10 @@ public:
 
 	void init();
 
+	/// @brief 停掉并释放全部 mock 车 worker 线程及车辆池。
+	/// 只能在 backend 线程内调用；调用后 init() 可重建池以支持重新打开组件。
+	void shutdown();
+
 	/// getter ------------------------------------------------
 
 	static QGeoCoordinate defaultLocation() { return _originLocation; }

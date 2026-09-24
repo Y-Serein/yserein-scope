@@ -56,7 +56,10 @@ void MockVehicleWorker::stop()
 
     // 发出 finish 信号
 
-    _thread->wait();
+    // give the thread a bounded exit window; timeout rather than block shutdown forever
+    if ( !_thread->wait(3000) ) {
+        zWarning(MockVehicleWorkerLog) << "mock vehicle worker thread did not stop within 3s; continuing shutdown";
+    }
 
     _thread->deleteLater();
 

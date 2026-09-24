@@ -1,5 +1,7 @@
 #include "ComponentManager.h"
 
+#include <serein/scope/AppPaths.h>
+
 #include <QtCore/QDir>
 #include <QtCore/QCoreApplication>
 #include <QtCore/QFile>
@@ -225,8 +227,8 @@ QString ComponentManager::defaultStorePath()
 {
     const QString overridePath = qEnvironmentVariable("SEREIN_COMPONENT_DIR");
     if (!overridePath.trimmed().isEmpty()) return QDir::cleanPath(overridePath);
-    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
-        .filePath(QStringLiteral("components"));
+    // 组件仓库与打包组件合并到同一处：exe 目录 / Components。
+    return AppPaths::componentsDir();
 }
 
 QString ComponentManager::packagedStorePath()
@@ -294,33 +296,10 @@ void ComponentManager::discover()
     QSet<QString> ids;
     const QStringList removed = removedIds();
 
-    // 扁平 .sscomponent(兼容旧式单文件组件)
-    for (const QFileInfo &file : directory.entryInfoList(QDir::Files, QDir::Name)) {
-        QString error;
-        const PluginMetadata metadata = probePackage(file.absoluteFilePath(), &error);
-        if (metadata.id.isEmpty()) {
-            report(QStringLiteral("warning"),
-                   tr("忽略无效插件包 %1：%2").arg(file.fileName(), error));
-            continue;
-        }
-        if (removed.contains(metadata.id)) {
-            report(QStringLiteral("info"),
-                   tr("跳过用户已移除的插件包：%1").arg(file.fileName()));
-            continue;
-        }
-        if (ids.contains(metadata.id)) {
-            report(QStringLiteral("error"), tr("插件 ID 重复，已忽略 %1").arg(file.fileName()));
-            continue;
-        }
-        ids.insert(metadata.id);
-        auto record = std::make_unique<ComponentRecord>();
-        record->metadata = metadata;
-        record->packagePath = file.absoluteFilePath();
-        record->packageDir = directory.absolutePath();
-        m_records.emplace_back(std::move(record));
-    }
-
-    // 自包含目录式组件:子目录内含 .sscomponent 及该组件专属的依赖 DLL
+    // 自包含目录式组件优先:子目录内含 .sscomponent 及该组件专属的依赖 DLL。
+    // 若同名组件同时存在扁平单文件(.sscomponent 直接位于仓库根目录),
+    // 优先使用目录式组件,因为单文件组件缺少其依赖 DLL,加载必然失败并
+    // 在启动时反复报"找不到指定的模块"。
     for (const QFileInfo &sub : directory.entryInfoList(
              QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)) {
         const QFileInfoList packages = QDir(sub.absoluteFilePath()).entryInfoList(
@@ -349,6 +328,34 @@ void ComponentManager::discover()
         record->metadata = metadata;
         record->packagePath = package.absoluteFilePath();
         record->packageDir = sub.absoluteFilePath();
+        m_records.emplace_back(std::move(record));
+    }
+
+    // 扁平 .sscomponent(兼容旧式单文件组件)。若同名自包含目录式组件
+    // 已注册,则忽略扁平单文件版本,避免加载缺依赖的裸包。
+    for (const QFileInfo &file : directory.entryInfoList(QDir::Files, QDir::Name)) {
+        QString error;
+        const PluginMetadata metadata = probePackage(file.absoluteFilePath(), &error);
+        if (metadata.id.isEmpty()) {
+            report(QStringLiteral("warning"),
+                   tr("忽略无效插件包 %1：%2").arg(file.fileName(), error));
+            continue;
+        }
+        if (removed.contains(metadata.id)) {
+            report(QStringLiteral("info"),
+                   tr("跳过用户已移除的插件包：%1").arg(file.fileName()));
+            continue;
+        }
+        if (ids.contains(metadata.id)) {
+            report(QStringLiteral("info"),
+                   tr("同名自包含目录式组件已优先注册，忽略扁平单文件 %1").arg(file.fileName()));
+            continue;
+        }
+        ids.insert(metadata.id);
+        auto record = std::make_unique<ComponentRecord>();
+        record->metadata = metadata;
+        record->packagePath = file.absoluteFilePath();
+        record->packageDir = directory.absolutePath();
         m_records.emplace_back(std::move(record));
     }
     emit componentsChanged();
@@ -467,7 +474,17 @@ QString ComponentManager::importPackage(const QString &sourcePath, QString *erro
     QString destinationDir;
     QString destination;
     if (sourceDir.isEmpty()) {
-        // 单文件组件
+        // 单文件组件。若仓库已存在同名自包含目录式组件，则忽略本次单文件导入，
+        // 避免把需要依赖 DLL 的组件降级成单文件裸包（加载必然失败）。
+        const QString stem = safeFileStem(metadata.id);
+        const QString existingDirPkg = QDir(m_storePath).filePath(
+            metadata.id + QLatin1Char('/') + stem + QStringLiteral(".sscomponent"));
+        if (QFileInfo::exists(existingDirPkg)) {
+            report(QStringLiteral("info"), tr("已存在自包含目录式组件，忽略单文件导入：%1").arg(metadata.name));
+            setRemoved(metadata.id, false);
+            emit componentsChanged();
+            return metadata.id;
+        }
         destinationDir = directory.absolutePath();
         destination = directory.filePath(
             safeFileStem(metadata.id) + QStringLiteral(".sscomponent"));
@@ -575,10 +592,29 @@ bool ComponentManager::load(const QString &id, QString *error, const bool rememb
 
     QObject *instance = loader->instance();
     if (!instance) {
-        record->error = loader->errorString();
-        setError(error, record->error);
-        emit componentsChanged();
-        return false;
+        // 自愈：若当前尝试加载的是扁平单文件组件（其必然缺少依赖 DLL 而失败），
+        // 而仓库同时存在同名自包含目录式组件，则自动切换到目录式组件重试。
+        const QString stem = safeFileStem(record->metadata.id);
+        const QString dirPkg = QDir(m_storePath).filePath(
+            record->metadata.id + QLatin1Char('/') + stem + QStringLiteral(".sscomponent"));
+        const bool isFlatPackage =
+            QFileInfo(record->packageDir).absoluteFilePath() ==
+            QFileInfo(m_storePath).absoluteFilePath();
+        if (isFlatPackage && QFileInfo::exists(dirPkg)) {
+            record->packagePath = dirPkg;
+            record->packageDir = QFileInfo(dirPkg).absolutePath();
+            record->error.clear();
+            loader = std::make_unique<QPluginLoader>();
+            loader->setLoadHints(QLibrary::LoadHints{});
+            loader->setFileName(record->packagePath);
+            instance = loader->instance();
+        }
+        if (!instance) {
+            record->error = loader->errorString();
+            setError(error, record->error);
+            emit componentsChanged();
+            return false;
+        }
     }
     auto *plugin = qobject_cast<IDevicePlugin *>(instance);
     if (!plugin) {

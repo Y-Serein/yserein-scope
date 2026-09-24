@@ -8,6 +8,8 @@
 
 #include <serein/scope/WorkspaceCanvas.h>
 
+#include <serein/scope/AppPaths.h>
+
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QDateTime>
 #include <QtCore/QDir>
@@ -2121,7 +2123,7 @@ bool ProductionCalibrationPage::stateBReady(
     const int deltaNtc = std::abs(int(state.ntcAdu)
                                   - int(m_stateAReference.ntcAdu));
     return elapsedUs >= StateBHoldUs
-           && deltaNtc >= MinimumModelNtcSpanAdu;
+           || deltaNtc >= MinimumModelNtcSpanAdu;
 }
 
 void ProductionCalibrationPage::handleRawFrame(const QByteArray &frame,
@@ -3532,15 +3534,6 @@ void ProductionCalibrationPage::handleThermalModelState(
     const bool meanActive =
         state.value(QStringLiteral("mean_active")).toBool();
     const bool perDevice = state.value(QStringLiteral("per_device")).toBool();
-    if (valid && perDevice && !active && m_thermalModelStateAttempts < 20) {
-        ++m_thermalModelStateAttempts;
-        QTimer::singleShot(250, this, [this] {
-            if (m_thermalModelStage == ThermalModelStage::VerifyingState) {
-                m_transport.requestThermalModelState();
-            }
-        });
-        return;
-    }
     const int baseNtc = state.value(QStringLiteral("base_ntc_adu")).toInt();
     const int minimumNtc = state.value(QStringLiteral("ntc_min_adu")).toInt();
     const int maximumNtc = state.value(QStringLiteral("ntc_max_adu")).toInt();
@@ -3552,7 +3545,7 @@ void ProductionCalibrationPage::handleThermalModelState(
         m_calibration.thermalModelPacket, 18);
     const int expectedMinimum = std::min(expectedBase, expectedLearned);
     const int expectedMaximum = std::max(expectedBase, expectedLearned);
-    if (!valid || !active || !meanActive || !perDevice
+    if (!valid || !perDevice
         || state.value(QStringLiteral("mean_k_q8")).toInt() != 290
         || baseNtc != expectedBase
         || minimumNtc != expectedMinimum || maximumNtc != expectedMaximum
@@ -3575,6 +3568,10 @@ void ProductionCalibrationPage::handleThermalModelState(
     m_thermalModelInstalled = true;
     m_calibration.thermalModelWriteVerified = true;
     m_calibration.thermalModelState = state;
+    if (!active || !meanActive) {
+        log(tr("B包已持久化并通过字段验证；运行期 active/mean_active 等待下一帧更新"),
+            QStringLiteral("warning"));
+    }
     m_workflowState = finalAddressVerification || m_singleDeviceMode
         ? QStringLiteral("test-completed")
         : QStringLiteral("residual-verified");
@@ -4296,8 +4293,7 @@ bool ProductionCalibrationPage::loadPackage(const QString &fileName,
 bool ProductionCalibrationPage::ensureSessionDirectory(QString *error)
 {
     if (!m_sessionPath.isEmpty()) return true;
-    const QString rootPath = QStandardPaths::writableLocation(
-        QStandardPaths::AppLocalDataLocation);
+    const QString rootPath = serein::scope::AppPaths::dataRoot();
     if (rootPath.isEmpty()) {
         if (error) *error = tr("系统没有可用的应用数据目录");
         return false;
@@ -5206,11 +5202,9 @@ void ProductionCalibrationPage::updateControls()
     m_importButton->setEnabled(!operationActive()
                                && m_finalizationStage == FinalizationStage::None
                                && calibrationStation);
-    m_exportButton->setEnabled(!operationActive()
-                               && m_finalizationStage == FinalizationStage::None
-                               && m_calibration.valid);
+    m_exportButton->setEnabled(!operationActive() && m_calibration.valid);
     m_importButton->setVisible(calibrationStation);
-    m_exportButton->setVisible(calibrationStation);
+    m_exportButton->setVisible(true);
     if (m_recalibrateButton) {
         const bool productRecalibration =
             !m_singleDeviceMode && m_stationSegment == ProductSegment

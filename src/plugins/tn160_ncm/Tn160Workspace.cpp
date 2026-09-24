@@ -9,6 +9,8 @@
 
 #include <serein/scope/WorkspaceCanvas.h>
 
+#include <serein/scope/AppPaths.h>
+
 #include <QtCore/QDateTime>
 #include <QtCore/QDir>
 #include <QtCore/QFileInfo>
@@ -117,8 +119,7 @@ QString temperatureText(const double value)
 
 QString diagnosticExportPath(const QString &extension)
 {
-    QString rootPath = QStandardPaths::writableLocation(
-        QStandardPaths::AppLocalDataLocation);
+    QString rootPath = serein::scope::AppPaths::dataRoot();
     if (rootPath.isEmpty()) {
         rootPath = QStandardPaths::writableLocation(
             QStandardPaths::DocumentsLocation);
