@@ -1,10 +1,10 @@
 {
   "id": "t384-thermal-ncm",
   "name": "T256/T384/T640 USB NCM",
-  "description": "T256/T384/T640 USB NCM 实时热图、趋势与实验二点黑体标定组件；不启用 OEM 温度。",
-  "version": "0.1.0",
+  "description": "T256/T384/T640 USB NCM 实时热图、趋势与实验两点产测标定；自动A/B写入、回读和运行时验证，不冒充OEM温度。",
+  "version": "0.2.0",
   "category": "Device component",
   "accent": "#ef8e62",
-  "capabilities": ["USB NCM", "RAW16", "实时热图", "趋势", "实验二点标定"],
+  "capabilities": ["USB NCM", "RAW16", "实时热图", "趋势", "实验两点产测", "A/B回读验证"],
   "interfaceVersion": 2
 }

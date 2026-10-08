@@ -52,6 +52,7 @@ public slots:
     void uploadCalibrationData(const QByteArray &payload);
     void commitCalibration();
     void abortCalibration();
+    void requestCalibrationBoundaryState(const QString &tag);
 
 signals:
     void stateChanged(const QString &state);
@@ -59,14 +60,20 @@ signals:
     void rawDataReceived(const QByteArray &data);
     void bytesReceived(qint64 count);
     void errorOccurred(const QString &message);
+    void retryScheduled(const QString &reason, int delayMs, int remainingMs);
     void diagnosticsReady(const QVariantMap &diagnostics);
+    void streamMetadataReady(const QVariantMap &metadata);
     void calibrationManifestReady(const QByteArray &manifest);
     void calibrationDataReady(const QByteArray &data);
     void calibrationProgress(qint64 sent, qint64 total);
     void calibrationOperationFinished(const QString &operation, bool success,
                                       const QString &message);
+    void calibrationBoundaryStateReady(const QString &tag, bool success,
+                                       const QVariantMap &snapshot,
+                                       const QString &message);
 
 private:
+    void beginConnectionPreflight();
     void beginStreamRequest();
     void scheduleInitialRetry(const QString &message);
     void initialRequestTimedOut();
@@ -77,16 +84,25 @@ private:
     [[nodiscard]] QUrl endpointUrl(const QString &path) const;
     [[nodiscard]] static QUrl normalizeEndpoint(const QString &endpoint);
     static QVariantMap parseDiagnostics(const QByteArray &body);
+    void requestModuleStateStatus();
+    void requestModuleStateData();
+    void finishModuleState(bool success, const QVariantMap &snapshot,
+                           const QString &message);
+    void cleanupModuleState(const QString &message);
+    static quint32 crc32(const QByteArray &bytes);
 
     std::unique_ptr<T384Engine> m_engine;
     std::unique_ptr<QNetworkAccessManager> m_network;
     QPointer<QNetworkReply> m_streamReply;
     QPointer<QNetworkReply> m_diagnosticsReply;
     QPointer<QNetworkReply> m_calibrationReply;
+    QPointer<QNetworkReply> m_moduleStateReply;
     QByteArray m_pendingBytes;
     QTimer m_retryTimer;
     QTimer m_initialRequestTimer;
     QTimer m_connectDeadlineTimer;
+    QTimer m_moduleStatePollTimer;
+    QTimer m_moduleStateDeadlineTimer;
     QElapsedTimer m_connectElapsed;
     QUrl m_endpoint = QUrl(QStringLiteral("http://192.168.17.1"));
     QVariantMap m_diagnostics;
@@ -95,6 +111,13 @@ private:
     bool m_stopping = false;
     bool m_initialRetryEnabled = false;
     bool m_streamReceivedData = false;
+    bool m_recoveringStream = false;
+    bool m_connectPreflight = false;
+    QString m_moduleStateTag;
+    QVariantMap m_moduleStateStatus;
+    QVariantMap m_moduleStateSnapshot;
+    quint32 m_moduleStateTransaction = 0;
+    bool m_moduleStateDownloaded = false;
 };
 
 } // namespace serein::scope::t384

@@ -6,6 +6,7 @@
 #include "Tn160FirmwareProfileGenerator.h"
 #include "Tn160Engine.h"
 #include "TrendWidget.h"
+#include <ThermalWorkbenchUi.h>
 
 #include <serein/scope/WorkspaceCanvas.h>
 
@@ -43,58 +44,6 @@
 
 namespace serein::scope::tn160ncm {
 namespace {
-
-struct SectionChrome {
-    QFrame *frame = nullptr;
-    QVBoxLayout *body = nullptr;
-};
-
-SectionChrome makeSection(QWidget *parent, const QString &objectName,
-                          const QString &title, const bool showTitle = true)
-{
-    auto *frame = new QFrame(parent);
-    frame->setObjectName(objectName);
-    frame->setMinimumWidth(0);
-    frame->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    auto *layout = new QVBoxLayout(frame);
-    layout->setContentsMargins(8, 8, 8, 8);
-    layout->setSpacing(6);
-    if (showTitle) {
-        auto *label = new QLabel(title, frame);
-        label->setObjectName(QStringLiteral("metricGroupLabel"));
-        label->setMinimumWidth(0);
-        layout->addWidget(label);
-    }
-    return {frame, layout};
-}
-
-QFrame *makeMetric(QWidget *parent, const QString &name, QLabel **value,
-                   const bool primary = false)
-{
-    auto *row = new QFrame(parent);
-    row->setObjectName(primary ? QStringLiteral("metricPrimary")
-                               : QStringLiteral("metricRow"));
-    row->setFixedHeight(primary ? 38 : 28);
-    row->setMinimumWidth(0);
-    row->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    auto *layout = new QHBoxLayout(row);
-    layout->setContentsMargins(4, 0, 4, 0);
-    auto *title = new QLabel(name, row);
-    title->setObjectName(primary ? QStringLiteral("metricPrimaryLabel")
-                                 : QStringLiteral("metricLabel"));
-    title->setMinimumWidth(0);
-    title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    *value = new QLabel(primary ? QStringLiteral("--.-- °C")
-                                : QStringLiteral("—"), row);
-    (*value)->setObjectName(primary ? QStringLiteral("metricPrimaryValue")
-                                    : QStringLiteral("metricValue"));
-    (*value)->setMinimumWidth(0);
-    (*value)->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
-    (*value)->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    layout->addWidget(title, 1);
-    layout->addWidget(*value);
-    return row;
-}
 
 double sampleValue(const SamplePacket &sample, const qsizetype index,
                    const double fallback = 0.0)
@@ -271,6 +220,8 @@ Tn160Workspace::Tn160Workspace(IHostServices *host, QWidget *parent)
     m_centerStack->setCurrentIndex(0);
     root->addWidget(m_centerStack, 1);
 
+    m_workbenchUi = std::make_unique<thermal::ThermalWorkbenchUi>(
+        this, QStringLiteral("tn160"));
     m_contextPanel = createUnifiedContext();
     m_inspectorPanel = createUnifiedInspector();
     m_outputPanel = createUnifiedOutput();
@@ -320,6 +271,8 @@ Tn160Workspace::Tn160Workspace(IHostServices *host, QWidget *parent)
     }
 }
 
+Tn160Workspace::~Tn160Workspace() = default;
+
 QWidget *Tn160Workspace::createLiveSurface()
 {
     m_liveCanvas = new WorkspaceCanvas(QStringLiteral("tn160-ncm/live-workbench-v1"), this);
@@ -338,25 +291,8 @@ QWidget *Tn160Workspace::createLiveSurface()
 
 QWidget *Tn160Workspace::createUnifiedContext()
 {
-    auto *scroll = new QScrollArea(this);
-    scroll->setObjectName(QStringLiteral("tn160UnifiedContext"));
-    scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setWidgetResizable(true);
-    scroll->setMinimumWidth(0);
-    scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-
-    auto *body = new QWidget(scroll);
-    body->setObjectName(QStringLiteral("tn160UnifiedContextBody"));
-    body->setMinimumWidth(0);
-    body->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    auto *layout = new QVBoxLayout(body);
-    layout->setContentsMargins(12, 10, 12, 12);
-    layout->setSpacing(8);
-
-    SectionChrome firmware = makeSection(
-        body, QStringLiteral("tn160UnifiedFirmwareSection"), tr("UF2 固件"), false);
+    thermal::WorkbenchSection firmware = m_workbenchUi->addContextSection(
+        QStringLiteral("tn160UnifiedFirmwareSection"), tr("UF2 固件"), false);
     QWidget *firmwareContext = m_firmware->contextPanel();
     firmwareContext->setMinimumWidth(0);
     firmwareContext->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -368,10 +304,8 @@ QWidget *Tn160Workspace::createUnifiedContext()
         firmwareHint->hide();
     }
     firmware.body->addWidget(firmwareContext);
-    layout->addWidget(firmware.frame);
-
-    SectionChrome connection = makeSection(
-        body, QStringLiteral("tn160UnifiedConnectionSection"), tr("设备与连接"), false);
+    thermal::WorkbenchSection connection = m_workbenchUi->addContextSection(
+        QStringLiteral("tn160UnifiedConnectionSection"), tr("设备与连接"), false);
     auto *endpointLabel = new QLabel(tr("USB NCM 地址"), connection.frame);
     endpointLabel->setObjectName(QStringLiteral("metricLabel"));
     connection.body->addWidget(endpointLabel);
@@ -411,10 +345,8 @@ QWidget *Tn160Workspace::createUnifiedContext()
             [this](const QString &endpoint) { m_calibration->setPort(endpoint); });
     connect(m_connectButton, &QPushButton::clicked,
             m_calibration, &ProductionCalibrationPage::toggleConnection);
-    layout->addWidget(connection.frame);
-
-    SectionChrome calibration = makeSection(
-        body, QStringLiteral("tn160UnifiedProductionSection"), tr("生产标定"), false);
+    thermal::WorkbenchSection calibration = m_workbenchUi->addContextSection(
+        QStringLiteral("tn160UnifiedProductionSection"), tr("生产标定"), false);
     auto *stepLayout = new QGridLayout;
     stepLayout->setContentsMargins(0, 0, 0, 0);
     stepLayout->setHorizontalSpacing(6);
@@ -450,10 +382,8 @@ QWidget *Tn160Workspace::createUnifiedContext()
             calibration.body->addWidget(button);
         }
     }
-    layout->addWidget(calibration.frame);
-
-    SectionChrome profile = makeSection(
-        body, QStringLiteral("tn160FirmwareProfileSection"),
+    thermal::WorkbenchSection profile = m_workbenchUi->addContextSection(
+        QStringLiteral("tn160FirmwareProfileSection"),
         tr("定制固件参数"), false);
     auto *profileButton = new QPushButton(tr("生成固件补偿参数"), profile.frame);
     profileButton->setObjectName(QStringLiteral("tn160GenerateFirmwareProfile"));
@@ -467,97 +397,56 @@ QWidget *Tn160Workspace::createUnifiedContext()
     profile.body->addWidget(profileButton);
     connect(profileButton, &QPushButton::clicked,
             this, &Tn160Workspace::generateFirmwareProfile);
-    layout->addWidget(profile.frame);
-
-    SectionChrome records = makeSection(
-        body, QStringLiteral("tn160UnifiedRecordsSection"), tr("生成记录"), false);
+    thermal::WorkbenchSection records = m_workbenchUi->addContextSection(
+        QStringLiteral("tn160UnifiedRecordsSection"), tr("生成记录"), false);
     QWidget *log = m_calibration->contextPanel();
     if (log->layout()) log->layout()->setContentsMargins(0, 0, 0, 0);
     log->setMinimumHeight(160);
     records.body->addWidget(log);
-    layout->addWidget(records.frame);
-    layout->addStretch(1);
-
-    scroll->setWidget(body);
-    return scroll;
+    m_workbenchUi->addContextStretch();
+    return m_workbenchUi->contextPanel();
 }
 
 QWidget *Tn160Workspace::createUnifiedInspector()
 {
-    auto *scroll = new QScrollArea(this);
-    scroll->setObjectName(QStringLiteral("tn160UnifiedInspector"));
-    scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setWidgetResizable(true);
-    scroll->setMinimumWidth(0);
-    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-
-    auto *body = new QWidget(scroll);
-    body->setObjectName(QStringLiteral("tn160UnifiedInspectorBody"));
-    body->setMinimumWidth(0);
-    body->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-    auto *layout = new QVBoxLayout(body);
-    layout->setContentsMargins(12, 10, 12, 12);
-    layout->setSpacing(8);
-
-    SectionChrome identity = makeSection(
-        body, QStringLiteral("tn160UnifiedIdentitySection"), tr("设备"));
+    thermal::WorkbenchSection identity = m_workbenchUi->addInspectorSection(
+        QStringLiteral("tn160UnifiedIdentitySection"), tr("设备"));
     m_deviceIdentity = new QLabel(tr("等待设备 · 192.168.17.1"), identity.frame);
     m_deviceIdentity->setObjectName(QStringLiteral("tn160UnifiedDeviceIdentity"));
     m_deviceIdentity->setWordWrap(true);
     m_deviceIdentity->setTextInteractionFlags(Qt::TextSelectableByMouse
                                                | Qt::TextSelectableByKeyboard);
     identity.body->addWidget(m_deviceIdentity);
-    layout->addWidget(identity.frame);
+    thermal::WorkbenchSection metrics = m_workbenchUi->addInspectorSection(
+        QStringLiteral("tn160UnifiedMetricsSection"), tr("实时数据"));
+    m_workbenchUi->addMetric(metrics, QStringLiteral("Center 5×5"),
+                             &m_centerMetric, true);
+    m_centerMetric->setText(QStringLiteral("--.-- °C"));
+    m_workbenchUi->addMetric(metrics, QStringLiteral("NTC"), &m_ntcMetric);
+    m_workbenchUi->addMetric(metrics, QStringLiteral("△NTC"), &m_deltaNtcMetric);
+    m_workbenchUi->addMetric(metrics, QStringLiteral("Center ADU"),
+                             &m_centerAduMetric);
+    m_workbenchUi->addMetric(metrics, QStringLiteral("VTEMP ADU"),
+                             &m_vtempMetric);
+    m_workbenchUi->addMetric(metrics, tr("帧率"), &m_fpsMetric);
 
-    SectionChrome metrics = makeSection(
-        body, QStringLiteral("tn160UnifiedMetricsSection"), tr("实时数据"));
-    metrics.body->addWidget(makeMetric(metrics.frame, QStringLiteral("Center 5×5"),
-                                       &m_centerMetric, true));
-    metrics.body->addWidget(makeMetric(metrics.frame, QStringLiteral("NTC"),
-                                       &m_ntcMetric));
-    metrics.body->addWidget(makeMetric(metrics.frame, QStringLiteral("△NTC"),
-                                       &m_deltaNtcMetric));
-    metrics.body->addWidget(makeMetric(metrics.frame, QStringLiteral("Center ADU"),
-                                       &m_centerAduMetric));
-    metrics.body->addWidget(makeMetric(metrics.frame, QStringLiteral("VTEMP ADU"),
-                                       &m_vtempMetric));
-    metrics.body->addWidget(makeMetric(metrics.frame, tr("帧率"), &m_fpsMetric));
-    layout->addWidget(metrics.frame);
-
-    SectionChrome hint = makeSection(
-        body, QStringLiteral("tn160UnifiedInspectorHint"), tr("采集说明"));
+    thermal::WorkbenchSection hint = m_workbenchUi->addInspectorSection(
+        QStringLiteral("tn160UnifiedInspectorHint"), tr("采集说明"));
     auto *text = new QLabel(
         tr("热图在中央主视图显示；温度、原始量和帧率在这里实时更新。"),
         hint.frame);
     text->setObjectName(QStringLiteral("pageSubtitle"));
     text->setWordWrap(true);
     hint.body->addWidget(text);
-    layout->addWidget(hint.frame);
-    layout->addStretch(1);
-
-    scroll->setWidget(body);
-    return scroll;
+    m_workbenchUi->addInspectorStretch();
+    return m_workbenchUi->inspectorPanel();
 }
 
 QWidget *Tn160Workspace::createUnifiedOutput()
 {
-    auto *panel = new QWidget(this);
-    panel->setObjectName(QStringLiteral("tn160UnifiedOutput"));
-    auto *layout = new QVBoxLayout(panel);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(4);
-
-    m_outputTabs = new QTabBar(panel);
-    m_outputTabs->setObjectName(QStringLiteral("tn160UnifiedOutputTabs"));
-    m_outputTabs->setDrawBase(false);
-    m_outputTabs->setExpanding(false);
-    m_outputTabs->addTab(tr("实时趋势"));
-    m_outputTabs->addTab(tr("标定结果"));
-    layout->addWidget(m_outputTabs);
-    m_outputStack = new QStackedWidget(panel);
-    m_outputStack->setObjectName(QStringLiteral("tn160UnifiedOutputStack"));
-    m_outputStack->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    QWidget *panel = m_workbenchUi->outputPanel();
+    m_outputTabs = m_workbenchUi->outputTabs();
+    m_outputStack = m_workbenchUi->outputStack();
     m_trend = new TrendWidget(m_outputStack);
     m_trend->setObjectName(QStringLiteral("tn160TrendWidget"));
     // The standalone trend widget keeps a 220 px editing minimum. Inside the
@@ -570,7 +459,7 @@ QWidget *Tn160Workspace::createUnifiedOutput()
             this, &Tn160Workspace::exportTrendPng);
     connect(m_trend, &TrendWidget::exportCsvRequested,
             this, &Tn160Workspace::exportDiagnosticCsv);
-    m_outputStack->addWidget(m_trend);
+    m_workbenchUi->addOutputPage(tr("实时趋势"), m_trend);
     auto *resultsPage = new QWidget(m_outputStack);
     resultsPage->setObjectName(QStringLiteral("tn160CalibrationResultsPage"));
     resultsPage->setMinimumSize(0, 0);
@@ -613,12 +502,7 @@ QWidget *Tn160Workspace::createUnifiedOutput()
         preview->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     }
     resultsLayout->addWidget(results, 1);
-    m_outputStack->addWidget(resultsPage);
-    layout->addWidget(m_outputStack, 1);
-    connect(m_outputTabs, &QTabBar::currentChanged,
-            m_outputStack, &QStackedWidget::setCurrentIndex);
-    m_outputTabs->setCurrentIndex(0);
-    m_outputStack->setCurrentIndex(0);
+    m_workbenchUi->addOutputPage(tr("标定结果"), resultsPage);
     return panel;
 }
 

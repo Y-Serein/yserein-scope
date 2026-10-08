@@ -38,7 +38,8 @@ add_library(serein_scope_tn160_ncm MODULE
 )
 
 target_link_libraries(serein_scope_tn160_ncm
-    PRIVATE serein_scope_core Qt6::Core Qt6::Gui Qt6::Widgets
+    PRIVATE serein_scope_core serein_scope_thermal_workbench
+            Qt6::Core Qt6::Gui Qt6::Widgets
 )
 set_target_properties(serein_scope_tn160_ncm PROPERTIES
     OUTPUT_NAME "SereinScope.TN160Ncm"

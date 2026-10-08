@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.24)
 
 project(SereinScope VERSION 1.0.1 LANGUAGES CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -35,3 +37,7 @@ qt_policy(SET QTP0004 NEW)
 add_subdirectory(src/core)
 add_subdirectory(src/app)
 add_subdirectory(src/plugins)
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()

@@ -6,6 +6,10 @@ option(SEREIN_BUILD_YSEREIN_HMI "Build the Y-Serein HMI component" ON)
 option(SEREIN_BUILD_YSEREIN_UNIVERSE "Build the YSerein Universe component" ON)
 option(SEREIN_BUILD_YSEREIN_SWARM_SIM "Build the YSerein Swarm Simulator component" ON)
 
+if(SEREIN_BUILD_TN160_NCM OR SEREIN_BUILD_T384)
+    add_subdirectory(thermal_workbench)
+endif()
+
 if(SEREIN_BUILD_SERIAL_SCOPE)
     add_subdirectory(serial_scope)
 endif()

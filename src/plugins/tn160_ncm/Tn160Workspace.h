@@ -11,11 +11,17 @@
 #include <QtCore/QPointer>
 #include <QtWidgets/QWidget>
 
+#include <memory>
+
 class QLabel;
 class QComboBox;
 class QPushButton;
 class QStackedWidget;
 class QTabBar;
+
+namespace serein::scope::thermal {
+class ThermalWorkbenchUi;
+}
 
 namespace serein::scope::tn160ncm {
 
@@ -34,7 +40,7 @@ class Tn160Workspace final : public QWidget, public IDeviceWorkspace,
 
 public:
     explicit Tn160Workspace(IHostServices *host, QWidget *parent = nullptr);
-    ~Tn160Workspace() override = default;
+    ~Tn160Workspace() override;
     void shutdown() override;
     [[nodiscard]] WorkspaceUiProvider *workspaceUiProvider() override;
     [[nodiscard]] QList<WorkspaceComponentDefinition>
@@ -61,6 +67,7 @@ private:
     void generateFirmwareProfile();
 
     IHostServices *m_host = nullptr;
+    std::unique_ptr<thermal::ThermalWorkbenchUi> m_workbenchUi;
     WorkspaceUiProvider *m_uiProvider = nullptr;
     FirmwarePage *m_firmware = nullptr;
     ProductionCalibrationPage *m_calibration = nullptr;
