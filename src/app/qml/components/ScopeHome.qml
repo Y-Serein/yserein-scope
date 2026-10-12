@@ -17,6 +17,23 @@ Rectangle {
     border.width: 1
     border.color: Theme.border(dark)
 
+    Dialog {
+        id: removeDialog
+        title: "移除插件"
+        modal: true
+        anchors.centerIn: parent
+        width: 360
+        property string installId: ""
+        property string pluginLabel: ""
+        standardButtons: Dialog.Yes | Dialog.Cancel
+        onAccepted: root.workbench.removeComponent(installId)
+        contentItem: Text {
+            text: "确定移除“" + removeDialog.pluginLabel + "”吗？"
+            color: Theme.text(root.dark)
+            wrapMode: Text.WordWrap
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 18
@@ -92,6 +109,16 @@ Rectangle {
                                 dark: root.dark
                                 text: "卸载"
                                 onClicked: root.workbench.unloadComponent(cardHost.componentId)
+                            }
+                            SereinButton {
+                                visible: root.management && !cardHost.loaded
+                                dark: root.dark
+                                text: "移除"
+                                onClicked: {
+                                    removeDialog.installId = cardHost.componentId
+                                    removeDialog.pluginLabel = cardHost.name + " v" + cardHost.version
+                                    removeDialog.open()
+                                }
                             }
                             SereinButton {
                                 dark: root.dark

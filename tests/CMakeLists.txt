@@ -1,3 +1,38 @@
+find_package(Qt6 6.4 REQUIRED COMPONENTS Test CorePrivate)
+
+foreach(version IN ITEMS v1 v2 v3)
+    string(TOUPPER "${version}" VERSION_UPPER)
+    add_library(scope_test_plugin_${version} MODULE
+        fixtures/TestPlugin${VERSION_UPPER}.cpp
+    )
+    target_link_libraries(scope_test_plugin_${version} PRIVATE
+        serein_scope_core Qt6::Core Qt6::Widgets
+    )
+    set_target_properties(scope_test_plugin_${version} PROPERTIES
+        PREFIX "" SUFFIX ".sscomponent"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-fixtures"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test-fixtures"
+    )
+endforeach()
+
+qt_add_executable(plugin_loading_tests
+    PluginLoading_test.cpp
+    ../src/app/ComponentManager.cpp
+    ../src/app/ComponentManager.h
+)
+target_include_directories(plugin_loading_tests PRIVATE ../src/app)
+target_link_libraries(plugin_loading_tests PRIVATE
+    serein_scope_core Qt6::Core Qt6::CorePrivate Qt6::Test Qt6::Widgets
+)
+target_compile_definitions(plugin_loading_tests PRIVATE
+    TEST_PLUGIN_V1_PATH="$<TARGET_FILE:scope_test_plugin_v1>"
+    TEST_PLUGIN_V2_PATH="$<TARGET_FILE:scope_test_plugin_v2>"
+    TEST_PLUGIN_V3_PATH="$<TARGET_FILE:scope_test_plugin_v3>"
+)
+add_dependencies(plugin_loading_tests scope_test_plugin_v1 scope_test_plugin_v2
+                 scope_test_plugin_v3)
+add_test(NAME plugin_loading_tests COMMAND plugin_loading_tests)
+
 add_executable(t384_calibration_protocol_tests
     T384CalibrationProtocol_test.cpp
     ../src/plugins/t384/T384CalibrationProtocol.cpp
@@ -51,3 +86,13 @@ if(SEREIN_BUILD_YSEREIN_SWARM_SIM)
     target_link_libraries(swarm_sim_box_dance_tests PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
     add_test(NAME swarm_sim_box_dance_tests COMMAND swarm_sim_box_dance_tests)
 endif()
+
+qt_add_executable(t384_oem_k_panel_tests
+    T384OemKPanel_test.cpp
+    ../src/plugins/t384/T384OemKPanel.cpp
+    ../src/plugins/t384/T384OemKPanel.h
+)
+target_include_directories(t384_oem_k_panel_tests PRIVATE ../src/plugins/t384)
+target_link_libraries(t384_oem_k_panel_tests PRIVATE Qt6::Core Qt6::Widgets Qt6::Network Qt6::Test)
+add_test(NAME t384_oem_k_panel_tests COMMAND t384_oem_k_panel_tests)
+set_tests_properties(t384_oem_k_panel_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

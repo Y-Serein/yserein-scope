@@ -25,7 +25,75 @@ ApplicationWindow {
         id: componentFileDialog
         title: "导入 Serein Scope 插件包"
         nameFilters: ["Serein Scope 插件包 (*.sscomponent)", "组件压缩包 (*.zip)", "所有文件 (*)"]
-        onAccepted: root.workbench.importComponent(selectedFile)
+        onAccepted: {
+            const detail = root.workbench.inspectComponentImport(selectedFile)
+            if (detail.error) {
+                errorDialog.title = "导入失败"
+                errorDialog.detail = detail.error
+                errorDialog.open()
+            } else if (detail.existingCount > 0) {
+                updateDialog.sourceUrl = selectedFile
+                updateDialog.detail = detail
+                updateDialog.open()
+            } else {
+                root.workbench.importComponent(selectedFile, 0, "")
+            }
+        }
+    }
+
+    Dialog {
+        id: updateDialog
+        title: "发现同一插件"
+        modal: true
+        anchors.centerIn: parent
+        width: 440
+        property url sourceUrl
+        property var detail: ({})
+        contentItem: ColumnLayout {
+            spacing: 8
+            Text {
+                text: "是否替代当前插件：" + updateDialog.detail.name + "？"
+                color: Theme.text(root.workbench.darkMode)
+                font.pixelSize: 14
+            }
+            Text {
+                text: "插件 ID：" + updateDialog.detail.id
+                    + "\n当前版本：" + updateDialog.detail.currentVersion
+                    + (updateDialog.detail.currentLoaded ? "（运行中，需先卸载）" : "")
+                    + "\n导入版本：" + updateDialog.detail.version
+                color: Theme.secondaryText(root.workbench.darkMode)
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+        }
+        footer: RowLayout {
+            spacing: 8
+            Item { Layout.fillWidth: true }
+            SereinButton {
+                dark: root.workbench.darkMode
+                kind: "primary"
+                text: "是（替代当前插件）"
+                onClicked: {
+                    updateDialog.close()
+                    root.workbench.importComponent(updateDialog.sourceUrl, 0,
+                                                   updateDialog.detail.replaceId)
+                }
+            }
+            SereinButton {
+                dark: root.workbench.darkMode
+                text: "否（新建插件）"
+                enabled: !updateDialog.detail.sameVersion
+                onClicked: {
+                    updateDialog.close()
+                    root.workbench.importComponent(updateDialog.sourceUrl, 1, "")
+                }
+            }
+            SereinButton {
+                dark: root.workbench.darkMode
+                text: "取消"
+                onClicked: updateDialog.close()
+            }
+        }
     }
 
     Dialog {

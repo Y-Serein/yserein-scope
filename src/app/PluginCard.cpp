@@ -8,10 +8,11 @@
 
 namespace serein::scope::app {
 
-PluginCard::PluginCard(PluginMetadata metadata, const bool loaded,
-                       const bool workspaceOpen, const bool managementActions,
-                       QWidget *parent)
-    : QFrame(parent), m_metadata(std::move(metadata))
+PluginCard::PluginCard(QString installId, PluginMetadata metadata,
+                       const bool loaded, const bool workspaceOpen,
+                       const bool managementActions, QWidget *parent)
+    : QFrame(parent), m_installId(std::move(installId)),
+      m_metadata(std::move(metadata))
 {
     setObjectName(QStringLiteral("pluginCard"));
     setMinimumHeight(182);
@@ -27,7 +28,8 @@ PluginCard::PluginCard(PluginMetadata metadata, const bool loaded,
     layout->addWidget(accent);
 
     auto *heading = new QHBoxLayout;
-    auto *kicker = new QLabel(m_metadata.category.toUpper());
+    auto *kicker = new QLabel(m_metadata.category.toUpper()
+                              + QStringLiteral("  ·  v") + m_metadata.version);
     kicker->setObjectName(QStringLiteral("cardKicker"));
     auto *state = new QLabel(loaded ? tr("已加载") : tr("已安装 · 未加载"));
     state->setObjectName(QStringLiteral("statusPill"));
@@ -66,20 +68,20 @@ PluginCard::PluginCard(PluginMetadata metadata, const bool loaded,
         : tr("加载插件"));
     primary->setProperty("kind", QStringLiteral("primary"));
     connect(primary, &QPushButton::clicked, this,
-            [this] { emit primaryRequested(m_metadata.id); });
+            [this] { emit primaryRequested(m_installId); });
     actions->addStretch();
     actions->addWidget(primary);
     if (managementActions && loaded) {
         auto *unload = new QPushButton(tr("卸载"));
         unload->setProperty("kind", QStringLiteral("warning"));
         connect(unload, &QPushButton::clicked, this,
-                [this] { emit unloadRequested(m_metadata.id); });
+                [this] { emit unloadRequested(m_installId); });
         actions->addWidget(unload);
     } else if (managementActions) {
         auto *remove = new QPushButton(tr("移除"));
         remove->setProperty("kind", QStringLiteral("quiet"));
         connect(remove, &QPushButton::clicked, this,
-                [this] { emit removeRequested(m_metadata.id); });
+                [this] { emit removeRequested(m_installId); });
         actions->addWidget(remove);
     }
     layout->addLayout(actions);

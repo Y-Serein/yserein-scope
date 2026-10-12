@@ -1,0 +1,8 @@
+{
+  "id": "scope-test-versioned",
+  "name": "版本管理测试插件",
+  "description": "插件安装和切换测试",
+  "version": "2.0.0",
+  "category": "Test",
+  "interfaceVersion": 2
+}

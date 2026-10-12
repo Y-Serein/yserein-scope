@@ -43,4 +43,8 @@
 /MEMORY.md
 /designs/
 /docs/
-/tools/
+/tools/*
+!/tools/windows_user_action.ps1
+!/tools/package_windows_installer.ps1
+!/tools/installer.nsi.in
+!/tools/component_sdk/

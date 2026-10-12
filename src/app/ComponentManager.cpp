@@ -15,6 +15,7 @@
 #include <QtCore/QSettings>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QTemporaryDir>
+#include <QtCore/QUuid>
 #include <QtCore/private/qzipreader_p.h>
 
 #include <algorithm>
@@ -253,7 +254,7 @@ QList<ComponentSnapshot> ComponentManager::components() const
     result.reserve(qsizetype(m_records.size()));
     for (const auto &record : m_records) {
         result.append({record->metadata, record->packagePath, record->error,
-                       record->plugin != nullptr});
+                       record->plugin != nullptr, record->installId});
     }
     return result;
 }
@@ -263,7 +264,7 @@ ComponentSnapshot ComponentManager::component(const QString &id) const
     const ComponentRecord *record = findRecord(id);
     if (!record) return {};
     return {record->metadata, record->packagePath, record->error,
-            record->plugin != nullptr};
+            record->plugin != nullptr, record->installId};
 }
 
 IDevicePlugin *ComponentManager::plugin(const QString &id) const
@@ -325,6 +326,7 @@ void ComponentManager::discover()
         }
         ids.insert(metadata.id);
         auto record = std::make_unique<ComponentRecord>();
+        record->installId = metadata.id;
         record->metadata = metadata;
         record->packagePath = package.absoluteFilePath();
         record->packageDir = sub.absoluteFilePath();
@@ -353,9 +355,34 @@ void ComponentManager::discover()
         }
         ids.insert(metadata.id);
         auto record = std::make_unique<ComponentRecord>();
+        record->installId = metadata.id;
         record->metadata = metadata;
         record->packagePath = file.absoluteFilePath();
         record->packageDir = directory.absolutePath();
+        m_records.emplace_back(std::move(record));
+    }
+    // 并存版本使用独立目录；安装标识与原插件 ID 分开，不修改插件 ABI。
+    QDir versions(directory.filePath(QStringLiteral("__versions")));
+    for (const QFileInfo &sub : versions.entryInfoList(
+             QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)) {
+        if (QUuid(sub.fileName()).isNull()) continue;
+        const QFileInfoList packages = QDir(sub.absoluteFilePath()).entryInfoList(
+            {QStringLiteral("*.sscomponent")}, QDir::Files, QDir::Name);
+        if (packages.isEmpty()) continue;
+        QString error;
+        const PluginMetadata metadata = probePackage(packages.first().absoluteFilePath(), &error);
+        if (metadata.id.isEmpty()) {
+            report(QStringLiteral("warning"),
+                   tr("忽略无效并存插件包 %1：%2").arg(sub.fileName(), error));
+            continue;
+        }
+        const QString installId = metadata.id + QStringLiteral("#install:") + sub.fileName();
+        if (removed.contains(installId)) continue;
+        auto record = std::make_unique<ComponentRecord>();
+        record->installId = installId;
+        record->metadata = metadata;
+        record->packagePath = packages.first().absoluteFilePath();
+        record->packageDir = sub.absoluteFilePath();
         m_records.emplace_back(std::move(record));
     }
     emit componentsChanged();
@@ -384,7 +411,8 @@ void ComponentManager::importPackagesFrom(const QString &dirPath)
         if (metadata.id.isEmpty() || removed.contains(metadata.id))
             return;
         QString error;
-        if (importPackage(packageFile.absoluteFilePath(), &error).isEmpty()) {
+        if (importPackage(packageFile.absoluteFilePath(), &error,
+                          ImportMode::Replace).isEmpty()) {
             report(QStringLiteral("warning"),
                    tr("内置插件包导入失败：%1").arg(error));
         }
@@ -421,37 +449,66 @@ void ComponentManager::restorePreferredComponents()
     }
 }
 
-QString ComponentManager::importPackage(const QString &sourcePath, QString *error)
+PluginMetadata ComponentManager::inspectPackage(const QString &sourcePath,
+                                                QString *error) const
 {
-    QFileInfo sourceInfo(sourcePath);
+    const QFileInfo source(sourcePath);
     QString packageFile = sourcePath;
-    QString sourceDir;
-    // 作用域必须覆盖整个函数:zip 解压目录在后续“目录式复制”完成前不能析构
-    QTemporaryDir zipTempDir;
-    if (sourceInfo.isDir()) {
-        // 目录式组件:在目录内查找 .sscomponent
-        QDir dir(sourceInfo.absoluteFilePath());
-        const QFileInfoList packageFiles = dir.entryInfoList(
+    QTemporaryDir extracted;
+    if (source.isDir()) {
+        const QFileInfoList packages = QDir(source.absoluteFilePath()).entryInfoList(
             {QStringLiteral("*.sscomponent")}, QDir::Files, QDir::Name);
-        if (packageFiles.isEmpty()) {
+        if (packages.isEmpty()) {
             setError(error, tr("目录中未找到 .sscomponent 组件包：%1").arg(sourcePath));
             return {};
         }
-        packageFile = packageFiles.first().absoluteFilePath();
-        sourceDir = dir.absolutePath();
-    } else if (sourceInfo.suffix().compare(QStringLiteral("zip"), Qt::CaseInsensitive) == 0) {
-        // zip 包:解压到临时目录,再按自包含目录式组件导入(依赖 DLL 随目录一起复制)
-        if (!zipTempDir.isValid() || !extractZipPackage(sourceInfo.absoluteFilePath(), zipTempDir.path())) {
+        packageFile = packages.first().absoluteFilePath();
+    } else if (source.suffix().compare(QStringLiteral("zip"), Qt::CaseInsensitive) == 0) {
+        if (!extracted.isValid()
+            || !extractZipPackage(source.absoluteFilePath(), extracted.path())) {
             setError(error, tr("压缩包解压失败：%1").arg(sourcePath));
             return {};
         }
-        const QFileInfo packageInfo = findPackageFile(zipTempDir.path());
-        if (packageInfo.filePath().isEmpty()) {
-            setError(error, tr("压缩包中未找到 .sscomponent 组件包：%1").arg(sourcePath));
+        const QFileInfo package = findPackageFile(extracted.path());
+        if (package.filePath().isEmpty()) {
+            setError(error, tr("压缩包中未找到 .sscomponent：%1").arg(sourcePath));
             return {};
         }
-        packageFile = packageInfo.absoluteFilePath();
-        sourceDir = packageInfo.absolutePath();
+        packageFile = package.absoluteFilePath();
+    }
+    return probePackage(packageFile, error);
+}
+
+QString ComponentManager::importPackage(const QString &sourcePath, QString *error,
+                                        const ImportMode mode,
+                                        const QString &replaceId)
+{
+    const QFileInfo sourceInfo(sourcePath);
+    QString packageFile = sourcePath;
+    QString sourceDir;
+    QTemporaryDir zipTempDir;
+    if (sourceInfo.isDir()) {
+        const QFileInfoList packages = QDir(sourceInfo.absoluteFilePath()).entryInfoList(
+            {QStringLiteral("*.sscomponent")}, QDir::Files, QDir::Name);
+        if (packages.isEmpty()) {
+            setError(error, tr("目录中未找到 .sscomponent 组件包：%1").arg(sourcePath));
+            return {};
+        }
+        packageFile = packages.first().absoluteFilePath();
+        sourceDir = sourceInfo.absoluteFilePath();
+    } else if (sourceInfo.suffix().compare(QStringLiteral("zip"), Qt::CaseInsensitive) == 0) {
+        if (!zipTempDir.isValid()
+            || !extractZipPackage(sourceInfo.absoluteFilePath(), zipTempDir.path())) {
+            setError(error, tr("压缩包解压失败：%1").arg(sourcePath));
+            return {};
+        }
+        const QFileInfo package = findPackageFile(zipTempDir.path());
+        if (package.filePath().isEmpty()) {
+            setError(error, tr("压缩包中未找到 .sscomponent：%1").arg(sourcePath));
+            return {};
+        }
+        packageFile = package.absoluteFilePath();
+        sourceDir = package.absolutePath();
     }
 
     QString probeError;
@@ -460,116 +517,172 @@ QString ComponentManager::importPackage(const QString &sourcePath, QString *erro
         setError(error, probeError);
         return {};
     }
-    ComponentRecord *existing = findRecord(metadata.id);
-    if (existing && existing->plugin) {
-        setError(error, tr("插件正在运行，请先卸载后再更新：%1").arg(metadata.name));
-        return {};
-    }
-    QDir directory(m_storePath);
-    if (!directory.exists() && !directory.mkpath(QStringLiteral("."))) {
-        setError(error, tr("无法创建插件仓库：%1").arg(m_storePath));
-        return {};
-    }
 
-    QString destinationDir;
-    QString destination;
-    if (sourceDir.isEmpty()) {
-        // 单文件组件。若仓库已存在同名自包含目录式组件，则忽略本次单文件导入，
-        // 避免把需要依赖 DLL 的组件降级成单文件裸包（加载必然失败）。
-        const QString stem = safeFileStem(metadata.id);
-        const QString existingDirPkg = QDir(m_storePath).filePath(
-            metadata.id + QLatin1Char('/') + stem + QStringLiteral(".sscomponent"));
-        if (QFileInfo::exists(existingDirPkg)) {
-            report(QStringLiteral("info"), tr("已存在自包含目录式组件，忽略单文件导入：%1").arg(metadata.name));
-            setRemoved(metadata.id, false);
-            emit componentsChanged();
-            return metadata.id;
+    if (mode == ImportMode::RejectConflict) {
+        for (const auto &record : m_records) {
+            if (record->metadata.id == metadata.id) {
+                setError(error, tr("插件 ID 已存在，请在插件管理界面选择替换或新建：%1")
+                                    .arg(metadata.id));
+                return {};
+            }
         }
-        destinationDir = directory.absolutePath();
-        destination = directory.filePath(
-            safeFileStem(metadata.id) + QStringLiteral(".sscomponent"));
-        if (QFileInfo(sourcePath).absoluteFilePath() !=
-            QFileInfo(destination).absoluteFilePath()) {
-            QFile source(sourcePath);
-            QSaveFile target(destination);
-            target.setDirectWriteFallback(true);
-            if (!source.open(QIODevice::ReadOnly) || !target.open(QIODevice::WriteOnly)) {
-                setError(error, tr("无法读取插件包或写入插件仓库"));
+    }
+    ComponentRecord *existing = nullptr;
+    if (mode != ImportMode::KeepBoth) {
+        if (!replaceId.isEmpty()) {
+            existing = findRecord(replaceId);
+            if (!existing || existing->metadata.id != metadata.id) {
+                setError(error, tr("替换目标与导入包的插件 ID 不一致"));
                 return {};
             }
-            while (!source.atEnd()) {
-                const QByteArray block = source.read(1024 * 1024);
-                if (block.isEmpty() && source.error() != QFileDevice::NoError) {
-                    target.cancelWriting();
-                    setError(error, tr("读取插件包失败：%1").arg(source.errorString()));
-                    return {};
+        } else {
+            existing = findRecord(metadata.id);
+            if (!existing) {
+                for (auto &record : m_records) {
+                    if (record->metadata.id == metadata.id) {
+                        existing = record.get();
+                        break;
+                    }
                 }
-                if (target.write(block) != block.size()) {
-                    target.cancelWriting();
-                    setError(error, tr("写入插件仓库失败：%1").arg(source.errorString()));
-                    return {};
-                }
-            }
-            if (!target.commit()) {
-                setError(error, tr("提交插件包失败：%1").arg(source.errorString()));
-                return {};
             }
         }
     } else {
-        // 目录式组件:整目录复制
-        const QString destDirName = safeFileStem(metadata.id);
-        destinationDir = directory.filePath(destDirName);
-        const bool sameLocation =
-            QFileInfo(sourceDir).absoluteFilePath() ==
-            QFileInfo(destinationDir).absoluteFilePath();
-        if (sameLocation) {
-            // 源与目标同目录(组件已就位于仓库):幂等处理,不删除、不拷贝,
-            // 仅将记录重新指向已有的组件包。此前会先把目标目录删除再判断
-            // 源==目标而跳过拷贝,导致源组件目录被误删(商店与打包目录重合时触发)。
-        } else {
-            if (QFileInfo::exists(destinationDir)) {
-                if (!QDir(destinationDir).removeRecursively()) {
-                    setError(error, tr("无法移除旧插件包目录：%1").arg(destinationDir));
-                    return {};
-                }
-            }
-            if (!copyDirectoryRecursively(sourceDir, destinationDir)) {
-                setError(error, tr("无法复制插件包目录：%1").arg(sourcePath));
+        for (const auto &record : m_records) {
+            if (record->metadata.id == metadata.id
+                && record->metadata.version == metadata.version) {
+                setError(error, tr("此版本已安装：%1 v%2")
+                                    .arg(metadata.name, metadata.version));
                 return {};
             }
         }
-        QDir destHandle(destinationDir);
-        const QFileInfoList pkgFiles = destHandle.entryInfoList(
-            {QStringLiteral("*.sscomponent")}, QDir::Files, QDir::Name);
-        if (pkgFiles.isEmpty()) {
-            setError(error, tr("插件包目录中未找到 .sscomponent：%1").arg(destinationDir));
-            return {};
-        }
-        destination = pkgFiles.first().absoluteFilePath();
+    }
+    if (existing && std::any_of(m_records.begin(), m_records.end(),
+                                 [&metadata, existing](const auto &record) {
+                                     return record.get() != existing
+                                         && record->metadata.id == metadata.id
+                                         && record->metadata.version == metadata.version;
+                                 })) {
+        setError(error, tr("导入版本已作为另一安装项存在：%1 v%2")
+                            .arg(metadata.name, metadata.version));
+        return {};
+    }
+    if (existing && existing->plugin) {
+        setError(error, tr("插件正在运行，请先关闭工作区并卸载后再替换：%1 v%2")
+                            .arg(existing->metadata.name, existing->metadata.version));
+        return {};
     }
 
+    QDir store(m_storePath);
+    if (!store.exists() && !store.mkpath(QStringLiteral("."))) {
+        setError(error, tr("无法创建插件仓库：%1").arg(m_storePath));
+        return {};
+    }
+    const QString stem = safeFileStem(metadata.id);
+    QString installId = existing ? existing->installId : metadata.id;
+    QString destinationDir;
+    if (existing && existing->installId != metadata.id) {
+        destinationDir = existing->packageDir;
+    } else if (!existing && mode == ImportMode::KeepBoth
+               && std::any_of(m_records.begin(), m_records.end(),
+                   [&metadata](const auto &record) {
+                       return record->metadata.id == metadata.id;
+                   })) {
+        const QString uuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        installId = metadata.id + QStringLiteral("#install:") + uuid;
+        destinationDir = store.filePath(QStringLiteral("__versions/") + uuid);
+    } else {
+        destinationDir = store.filePath(stem);
+    }
+    const QString oldPackage = existing ? existing->packagePath : QString();
+    const QString oldDir = existing ? existing->packageDir : QString();
+    if (QFileInfo::exists(destinationDir)
+        && (!existing || QDir(oldDir).absolutePath() != QDir(destinationDir).absolutePath())) {
+        setError(error, tr("目标目录已被其他插件占用：%1").arg(destinationDir));
+        return {};
+    }
+    if (existing && QFileInfo(packageFile).absoluteFilePath()
+                        == QFileInfo(oldPackage).absoluteFilePath()
+        && metadata.version == existing->metadata.version) {
+        return installId;
+    }
+
+    const QString stagingRoot = store.filePath(QStringLiteral("__staging"));
+    if (!QDir().mkpath(stagingRoot)) {
+        setError(error, tr("无法创建插件临时目录：%1").arg(stagingRoot));
+        return {};
+    }
+    const QString transaction = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString staged = QDir(stagingRoot).filePath(transaction + QStringLiteral(".new"));
+    const QString backup = QDir(stagingRoot).filePath(transaction + QStringLiteral(".old"));
+    const bool copied = sourceDir.isEmpty()
+        ? (QDir().mkpath(staged)
+           && copyFileRecursively(QFileInfo(packageFile), staged)
+           && (QFileInfo(packageFile).fileName() == stem + QStringLiteral(".sscomponent")
+               || QFile::rename(QDir(staged).filePath(QFileInfo(packageFile).fileName()),
+                                QDir(staged).filePath(stem + QStringLiteral(".sscomponent")))))
+        : copyDirectoryRecursively(sourceDir, staged);
+    if (!copied) {
+        QDir(staged).removeRecursively();
+        setError(error, tr("无法复制插件包到临时目录：%1").arg(sourcePath));
+        return {};
+    }
+    const QFileInfoList stagedPackages = QDir(staged).entryInfoList(
+        {QStringLiteral("*.sscomponent")}, QDir::Files, QDir::Name);
+    if (stagedPackages.isEmpty()
+        || [&] {
+            const PluginMetadata stagedMetadata =
+                probePackage(stagedPackages.first().absoluteFilePath());
+            return stagedMetadata.id != metadata.id
+                || stagedMetadata.version != metadata.version;
+        }()) {
+        QDir(staged).removeRecursively();
+        setError(error, tr("复制后的插件包元数据无效或 ID 不一致"));
+        return {};
+    }
+    if (!QDir().mkpath(QFileInfo(destinationDir).absolutePath())) {
+        QDir(staged).removeRecursively();
+        setError(error, tr("无法创建插件版本目录"));
+        return {};
+    }
+    const bool hadDestination = QFileInfo::exists(destinationDir);
+    if (hadDestination && !QDir().rename(destinationDir, backup)) {
+        QDir(staged).removeRecursively();
+        setError(error, tr("无法暂存旧插件包：%1").arg(destinationDir));
+        return {};
+    }
+    if (!QDir().rename(staged, destinationDir)) {
+        if (hadDestination && !QDir().rename(backup, destinationDir)) {
+            setError(error, tr("安装失败且旧插件恢复失败，请检查：%1").arg(backup));
+        } else {
+            setError(error, tr("无法提交插件包，旧版本已恢复"));
+        }
+        QDir(staged).removeRecursively();
+        return {};
+    }
+    if (hadDestination && !QDir(backup).removeRecursively())
+        report(QStringLiteral("warning"), tr("旧插件临时备份未能清理：%1").arg(backup));
+    const QString destination = QDir(destinationDir).filePath(stagedPackages.first().fileName());
+
     if (existing) {
-        const QString previousPath = existing->packagePath;
         existing->metadata = metadata;
         existing->packagePath = destination;
         existing->packageDir = destinationDir;
         existing->error.clear();
-        if (previousPath != destination && QFile::exists(previousPath)) {
-            QFile::remove(previousPath);
-        }
+        if (oldDir == store.absolutePath() && oldPackage != destination)
+            QFile::remove(oldPackage);
     } else {
         auto record = std::make_unique<ComponentRecord>();
+        record->installId = installId;
         record->metadata = metadata;
         record->packagePath = destination;
         record->packageDir = destinationDir;
         m_records.emplace_back(std::move(record));
     }
-    // 用户手动导入 = 主动重新启用该组件，清除"已移除"标记
-    setRemoved(metadata.id, false);
-    report(QStringLiteral("info"), tr("已导入插件包：%1 %2")
+    setRemoved(installId, false);
+    report(QStringLiteral("info"), tr("已导入插件包：%1 v%2")
                                       .arg(metadata.name, metadata.version));
     emit componentsChanged();
-    return metadata.id;
+    return installId;
 }
 
 bool ComponentManager::load(const QString &id, QString *error, const bool remember)
@@ -580,6 +693,14 @@ bool ComponentManager::load(const QString &id, QString *error, const bool rememb
         return false;
     }
     if (record->plugin) return true;
+    for (const auto &other : m_records) {
+        if (other.get() != record && other->plugin
+            && other->metadata.id == record->metadata.id) {
+            setError(error, tr("同一插件已有其他版本在运行，请先关闭其工作区并卸载：%1 v%2")
+                                .arg(other->metadata.name, other->metadata.version));
+            return false;
+        }
+    }
 
     auto loader = std::make_unique<QPluginLoader>();
     loader->setLoadHints(QLibrary::LoadHints{});
@@ -596,7 +717,7 @@ bool ComponentManager::load(const QString &id, QString *error, const bool rememb
         // 而仓库同时存在同名自包含目录式组件，则自动切换到目录式组件重试。
         const QString stem = safeFileStem(record->metadata.id);
         const QString dirPkg = QDir(m_storePath).filePath(
-            record->metadata.id + QLatin1Char('/') + stem + QStringLiteral(".sscomponent"));
+            stem + QLatin1Char('/') + stem + QStringLiteral(".sscomponent"));
         const bool isFlatPackage =
             QFileInfo(record->packageDir).absoluteFilePath() ==
             QFileInfo(m_storePath).absoluteFilePath();
@@ -626,8 +747,9 @@ bool ComponentManager::load(const QString &id, QString *error, const bool rememb
     }
     const PluginMetadata runtimeMetadata = hostOwnedMetadata(plugin->metadata());
     if (runtimeMetadata.id != record->metadata.id
+        || runtimeMetadata.version != record->metadata.version
         || runtimeMetadata.interfaceVersion != PluginInterfaceVersion) {
-        record->error = tr("插件运行时元数据不一致或 ABI 不兼容");
+        record->error = tr("插件运行时 ID/版本与包元数据不一致，或 ABI 不兼容");
         loader->unload();
         setError(error, record->error);
         emit componentsChanged();
@@ -715,7 +837,7 @@ bool ComponentManager::removeInstalled(const QString &id, QString *error)
     setRemoved(id, true);
     rememberLoaded(id, false);
     std::erase_if(m_records, [&id](const auto &candidate) {
-        return candidate->metadata.id == id;
+        return candidate->installId == id;
     });
     report(QStringLiteral("info"), tr("已移除插件：%1").arg(name));
     emit componentsChanged();
@@ -751,6 +873,13 @@ PluginMetadata ComponentManager::probePackage(const QString &path, QString *erro
         setError(error, tr("插件元数据缺失或 ABI 版本不匹配"));
         return {};
     }
+    const QString stem = safeFileStem(metadata.id);
+    if (stem == QStringLiteral(".") || stem == QStringLiteral("..")
+        || stem == QStringLiteral("__versions")
+        || stem == QStringLiteral("__staging")) {
+        setError(error, tr("插件 ID 与仓库保留目录冲突：%1").arg(metadata.id));
+        return {};
+    }
     if (metadata.description.isEmpty()) metadata.description = QObject::tr("第三方插件");
     if (metadata.version.isEmpty()) metadata.version = QStringLiteral("0.0.0");
     if (metadata.category.isEmpty()) metadata.category = QStringLiteral("Component");
@@ -760,7 +889,7 @@ PluginMetadata ComponentManager::probePackage(const QString &path, QString *erro
 ComponentManager::ComponentRecord *ComponentManager::findRecord(const QString &id)
 {
     for (auto &record : m_records) {
-        if (record->metadata.id == id) return record.get();
+        if (record->installId == id) return record.get();
     }
     return nullptr;
 }
@@ -768,7 +897,7 @@ ComponentManager::ComponentRecord *ComponentManager::findRecord(const QString &i
 const ComponentManager::ComponentRecord *ComponentManager::findRecord(const QString &id) const
 {
     for (const auto &record : m_records) {
-        if (record->metadata.id == id) return record.get();
+        if (record->installId == id) return record.get();
     }
     return nullptr;
 }

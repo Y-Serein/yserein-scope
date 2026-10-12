@@ -9,6 +9,7 @@ import YSerein.SwarmSimulator.Middle.Drone
 Rectangle {
     id: root
     color: Theme.colors.baseBackground
+    clip: true
 
     ColumnLayout {
         anchors.fill: parent
@@ -17,6 +18,8 @@ Rectangle {
         DroneFormView {
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.minimumHeight: 0
+            Layout.preferredHeight: root.height * 0.55
         }
 
         Rectangle {
@@ -28,6 +31,8 @@ Rectangle {
         DroneDetailView {
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.minimumHeight: 0
+            Layout.preferredHeight: root.height * 0.45
         }
     }
 }

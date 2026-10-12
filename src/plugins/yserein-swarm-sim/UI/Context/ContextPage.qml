@@ -45,13 +45,16 @@ Rectangle {
     }
 
     ScrollView {
+        id: sessionScroll
         anchors.fill: parent
+        clip: true
+        contentWidth: availableWidth
         contentHeight: content.implicitHeight + 24
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
     ColumnLayout {
         id: content
-        width: root.width - 24
+        width: Math.max(0, sessionScroll.availableWidth - 24)
         x: 12
         y: 12
         spacing: 10
@@ -68,6 +71,7 @@ Rectangle {
             enabled: !root.mockController.clearing
             text: qsTr("导入舞步")
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             implicitHeight: 32
             onClicked: fileDialog.open()
 
@@ -96,6 +100,7 @@ Rectangle {
 
         ComboBox {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             model: [qsTr("箱式舞步"), qsTr("导入舞步")]
             currentIndex: root.useBoxDance ? 0 : 1
             onActivated: root.selectSource(index === 0)
@@ -103,6 +108,7 @@ Rectangle {
 
         Label {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             wrapMode: Text.WordWrap
             color: root.canPlay ? Theme.colors.secondaryText : Theme.colors.warning
             font.pixelSize: 11
@@ -120,9 +126,11 @@ Rectangle {
 
         RowLayout {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             spacing: 6
             Button {
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 text: root.playbackState === 1 ? qsTr("暂停") : qsTr("播放舞步")
                 enabled: root.canPlay
                 onClicked: root.togglePlayback()
@@ -137,6 +145,7 @@ Rectangle {
 
         Button {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             visible: root.useBoxDance && root.mockController.danceMaxLayers > 1
             enabled: root.mockController.danceCanPlay
             text: qsTr("预览整队起飞后")
@@ -148,6 +157,7 @@ Rectangle {
 
         Label {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             wrapMode: Text.WordWrap
             color: Theme.colors.secondaryText
             font.pixelSize: 11
@@ -171,12 +181,18 @@ Rectangle {
         }
 
         Label {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            wrapMode: Text.Wrap
             text: qsTr("目标 192.168.20.251:37890")
             color: Theme.colors.secondaryText
             font.pixelSize: 12
         }
 
         Label {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            wrapMode: Text.Wrap
             text: qsTr("通信协议（下次启动 Scope 生效）")
             color: Theme.colors.regularText
             font.pixelSize: 11
@@ -185,12 +201,14 @@ Rectangle {
         ComboBox {
             id: protocolDomain
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             model: [qsTr("Private16（集群模拟）"), qsTr("Standard8（1–250 台）")]
             currentIndex: Frontend.mockVehicleController.configuredProtocolDomain
             onActivated: Frontend.mockVehicleController.setConfiguredProtocolDomain(index)
         }
         Label {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             wrapMode: Text.WordWrap
             color: Theme.colors.secondaryText
             font.pixelSize: 11
@@ -201,6 +219,7 @@ Rectangle {
 
         Rectangle {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             Layout.preferredHeight: 1
             color: Theme.colors.lightBorder
         }
@@ -212,8 +231,12 @@ Rectangle {
             font.weight: Font.Medium
         }
 
-        RowLayout {
-            spacing: 6
+        GridLayout {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            columns: content.width < 260 ? 2 : 4
+            columnSpacing: 6
+            rowSpacing: 6
             Label { text: qsTr("行"); color: Theme.colors.regularText; font.pixelSize: 12 }
             SpinBox {
                 id: gridRows
@@ -222,10 +245,11 @@ Rectangle {
                 value: 10
                 editable: true
                 live: true
-                implicitWidth: 84
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                Layout.preferredWidth: 84
                 implicitHeight: 30
             }
-            Label { text: "×"; color: Theme.colors.secondaryText }
             Label { text: qsTr("列"); color: Theme.colors.regularText; font.pixelSize: 12 }
             SpinBox {
                 id: gridCols
@@ -234,7 +258,9 @@ Rectangle {
                 value: 10
                 editable: true
                 live: true
-                implicitWidth: 84
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                Layout.preferredWidth: 84
                 implicitHeight: 30
             }
         }
@@ -258,6 +284,7 @@ Rectangle {
             id: genGrid
             text: qsTr("一键生成")
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             implicitHeight: 32
             enabled: !root.mockController.clearing && root.requestedGridCount <= root.gridLimit - Frontend.mockVehicleController.count
             onClicked: Frontend.mockVehicleController.generateGridVehicles(
@@ -283,6 +310,7 @@ Rectangle {
 
         Button {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             text: root.mockController.clearing ? qsTr("正在清除…") : qsTr("清除全部模拟机")
             enabled: !root.mockController.clearing && !root.confirmClear
                      && (root.mockController.count > 0 || root.playerController.canPlay)
@@ -291,22 +319,27 @@ Rectangle {
 
         ColumnLayout {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             visible: root.confirmClear && !root.mockController.clearing
             Label {
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 wrapMode: Text.WordWrap
                 color: Theme.colors.regularText
                 text: qsTr("清除当前全部模拟机并停止播放？当前导入舞步将一并卸载，原始文件保留。")
             }
             RowLayout {
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 Button {
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     text: qsTr("取消")
                     onClicked: root.confirmClear = false
                 }
                 Button {
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     text: qsTr("确认清除")
                     onClicked: {
                         root.confirmClear = false
@@ -317,6 +350,7 @@ Rectangle {
         }
         Label {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             visible: text.length > 0
             wrapMode: Text.WordWrap
             color: Theme.colors.secondaryText
@@ -325,6 +359,7 @@ Rectangle {
 
         Label {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             wrapMode: Text.WordWrap
             color: root.requestedGridCount > root.gridLimit - Frontend.mockVehicleController.count
                    ? Theme.colors.warning : Theme.colors.secondaryText
@@ -338,6 +373,7 @@ Rectangle {
 
         Rectangle {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             Layout.preferredHeight: 1
             color: Theme.colors.lightBorder
         }
@@ -349,8 +385,12 @@ Rectangle {
             font.weight: Font.Medium
         }
 
-        RowLayout {
-            spacing: 6
+        GridLayout {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            columns: content.width < 260 ? 2 : 4
+            columnSpacing: 6
+            rowSpacing: 6
             Label { text: qsTr("箱子 行"); color: Theme.colors.regularText; font.pixelSize: 12 }
             SpinBox {
                 id: boxRows
@@ -360,11 +400,12 @@ Rectangle {
                 enabled: Frontend.mockVehicleController.dancePlaybackState !== 1
                 editable: true
                 live: true
-                implicitWidth: 76
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                Layout.preferredWidth: 76
                 implicitHeight: 30
                 onValueModified: Frontend.mockVehicleController.setBoxRows(value)
             }
-            Label { text: "×"; color: Theme.colors.secondaryText }
             Label { text: qsTr("列"); color: Theme.colors.regularText; font.pixelSize: 12 }
             SpinBox {
                 id: boxCols
@@ -374,7 +415,9 @@ Rectangle {
                 enabled: Frontend.mockVehicleController.dancePlaybackState !== 1
                 editable: true
                 live: true
-                implicitWidth: 76
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                Layout.preferredWidth: 76
                 implicitHeight: 30
                 onValueModified: Frontend.mockVehicleController.setBoxCols(value)
             }
@@ -382,6 +425,7 @@ Rectangle {
 
         Label {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             wrapMode: Text.WordWrap
             color: Theme.colors.secondaryText
             font.pixelSize: 11
@@ -392,6 +436,7 @@ Rectangle {
         }
         Label {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             wrapMode: Text.WordWrap
             color: Theme.colors.secondaryText
             font.pixelSize: 11

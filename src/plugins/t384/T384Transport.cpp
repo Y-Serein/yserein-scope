@@ -26,6 +26,8 @@ constexpr int InitialRequestTimeoutMs = 5000;
 constexpr int InitialConnectionTimeoutMs = 30000;
 constexpr int ModuleStateDeadlineMs = 40000;
 constexpr int ModuleStatePollMs = 100;
+constexpr int ModuleStateReleasePollMs = 250;
+constexpr int ModuleStateReleaseTimeoutMs = 10000;
 
 } // namespace
 
@@ -38,6 +40,7 @@ T384Transport::T384Transport(std::unique_ptr<T384Engine> engine,
     m_initialRequestTimer.setSingleShot(true);
     m_connectDeadlineTimer.setSingleShot(true);
     m_moduleStatePollTimer.setSingleShot(true);
+    m_moduleStateReleaseTimer.setSingleShot(true);
     m_moduleStateDeadlineTimer.setSingleShot(true);
     connect(&m_retryTimer, &QTimer::timeout, this,
             &T384Transport::beginConnectionPreflight);
@@ -47,6 +50,8 @@ T384Transport::T384Transport(std::unique_ptr<T384Engine> engine,
             &T384Transport::initialConnectionTimedOut);
     connect(&m_moduleStatePollTimer, &QTimer::timeout, this,
             &T384Transport::requestModuleStateStatus);
+    connect(&m_moduleStateReleaseTimer, &QTimer::timeout, this,
+            &T384Transport::requestModuleStateStreamRelease);
     connect(&m_moduleStateDeadlineTimer, &QTimer::timeout, this, [this] {
         cleanupModuleState(tr("读取采集边界状态超过%1 ms")
                                .arg(ModuleStateDeadlineMs));
@@ -318,6 +323,7 @@ void T384Transport::stop()
         m_calibrationReply = nullptr;
     }
     m_moduleStatePollTimer.stop();
+    m_moduleStateReleaseTimer.stop();
     m_moduleStateDeadlineTimer.stop();
     if (m_moduleStateReply) {
         disconnect(m_moduleStateReply, nullptr, this, nullptr);
@@ -442,7 +448,48 @@ void T384Transport::requestCalibrationBoundaryState(const QString &tag)
     m_moduleStateSnapshot.clear();
     m_moduleStateTransaction = 0;
     m_moduleStateDownloaded = false;
+    m_moduleStateReleaseElapsed.start();
     m_moduleStateDeadlineTimer.start(ModuleStateDeadlineMs);
+    requestModuleStateStreamRelease();
+}
+
+void T384Transport::requestModuleStateStreamRelease()
+{
+    if (m_moduleStateTag.isEmpty() || m_moduleStateReply) return;
+    if (m_moduleStateReleaseElapsed.elapsed() >= ModuleStateReleaseTimeoutMs) {
+        cleanupModuleState(tr("视频流未释放；请关闭其他画面后重试"));
+        return;
+    }
+    QNetworkRequest request(endpointUrl(QString::fromLatin1(DiagnosticsPath)));
+    request.setTransferTimeout(3000);
+    m_moduleStateReply = m_network->get(request);
+    connect(m_moduleStateReply, &QNetworkReply::finished, this, [this] {
+        QPointer<QNetworkReply> reply = std::exchange(m_moduleStateReply, {});
+        if (!reply) return;
+        const int status = reply->attribute(
+            QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body = reply->readAll();
+        const bool ok = reply->error() == QNetworkReply::NoError && status == 200;
+        reply->deleteLater();
+        if (ok) {
+            const QString active = parseDiagnostics(body)
+                .value(QStringLiteral("stream.active")).toString();
+            if (active == QStringLiteral("0")) {
+                startModuleStateRead();
+                return;
+            }
+            if (active != QStringLiteral("1")) {
+                cleanupModuleState(tr("设备诊断缺少有效的stream.active状态"));
+                return;
+            }
+        }
+        m_moduleStateReleaseTimer.start(ModuleStateReleasePollMs);
+    });
+}
+
+void T384Transport::startModuleStateRead()
+{
+    if (m_moduleStateTag.isEmpty() || m_moduleStateReply) return;
     QNetworkRequest request(endpointUrl(
         QStringLiteral("/api/v1/module-files/read")));
     request.setHeader(QNetworkRequest::ContentTypeHeader,
@@ -460,7 +507,14 @@ void T384Transport::requestCalibrationBoundaryState(const QString &tag)
         reply->deleteLater();
         QJsonParseError parseError;
         const QJsonDocument document = QJsonDocument::fromJson(body, &parseError);
-        if (!networkError.isEmpty() || status != 200 || !document.isObject()) {
+        if (status == 409) {
+            if (m_moduleStateReleaseElapsed.elapsed() < ModuleStateReleaseTimeoutMs)
+                m_moduleStateReleaseTimer.start(ModuleStateReleasePollMs);
+            else
+                cleanupModuleState(tr("视频流或机芯状态仍被占用；请关闭其他画面后重试"));
+            return;
+        }
+        if (!networkError.isEmpty() || status != 202 || !document.isObject()) {
             cleanupModuleState(networkError.isEmpty()
                 ? tr("启动cal-state失败：HTTP %1 / %2")
                       .arg(status).arg(parseError.errorString())
@@ -619,13 +673,16 @@ void T384Transport::finishModuleState(const bool success,
                                       const QString &message)
 {
     const QString tag = std::exchange(m_moduleStateTag, {});
+    // snapshot may refer to m_moduleStateSnapshot; keep it before clearing state.
+    const QVariantMap completedSnapshot = snapshot;
     m_moduleStatePollTimer.stop();
+    m_moduleStateReleaseTimer.stop();
     m_moduleStateDeadlineTimer.stop();
     m_moduleStateTransaction = 0;
     m_moduleStateStatus.clear();
     m_moduleStateSnapshot.clear();
     m_moduleStateDownloaded = false;
-    emit calibrationBoundaryStateReady(tag, success, snapshot, message);
+    emit calibrationBoundaryStateReady(tag, success, completedSnapshot, message);
 }
 
 void T384Transport::cleanupModuleState(const QString &message)

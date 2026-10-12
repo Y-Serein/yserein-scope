@@ -1,0 +1,10 @@
+{
+  "id": "template-component",
+  "name": "Template Component",
+  "description": "Serein Scope 组件模板：新建组件的最小骨架，可直接复制改名。",
+  "version": "1.0.0",
+  "category": "示例组件",
+  "accent": "#65d1c5",
+  "capabilities": ["示例"],
+  "interfaceVersion": 2
+}

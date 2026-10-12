@@ -8,6 +8,8 @@ add_library(serein_scope_t384 MODULE
     T384Transport.cpp
     T384Engine.h
     T384Engine.cpp
+    T384OemKPanel.h
+    T384OemKPanel.cpp
     T384CalibrationPage.h
     T384CalibrationPage.cpp
     T384CalibrationProtocol.h

@@ -10,8 +10,9 @@ class PluginCard final : public QFrame {
     Q_OBJECT
 
 public:
-    explicit PluginCard(PluginMetadata metadata, bool loaded, bool workspaceOpen,
-                        bool managementActions, QWidget *parent = nullptr);
+    explicit PluginCard(QString installId, PluginMetadata metadata, bool loaded,
+                        bool workspaceOpen, bool managementActions,
+                        QWidget *parent = nullptr);
 
 signals:
     void primaryRequested(const QString &pluginId);
@@ -19,6 +20,7 @@ signals:
     void removeRequested(const QString &pluginId);
 
 private:
+    QString m_installId;
     PluginMetadata m_metadata;
 };
 

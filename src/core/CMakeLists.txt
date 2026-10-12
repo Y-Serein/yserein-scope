@@ -33,6 +33,10 @@ add_library(serein_scope_core SHARED
     src/ChannelRegistry.cpp
     src/WorkspaceComponentInspector.cpp
 )
+add_library(SereinScopeCore::serein_scope_core ALIAS serein_scope_core)
+
+# Core SDK compatibility is versioned independently of the host executable.
+set(SEREIN_SCOPE_CORE_VERSION 1.0.1)
 
 target_compile_definitions(serein_scope_core PRIVATE SEREIN_SCOPE_CORE_LIBRARY)
 target_include_directories(serein_scope_core
@@ -49,8 +53,71 @@ if(WIN32)
 endif()
 
 set_target_properties(serein_scope_core PROPERTIES
-    VERSION ${PROJECT_VERSION}
+    VERSION ${SEREIN_SCOPE_CORE_VERSION}
     SOVERSION 0
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+# The native SDK is built with the host toolchain and installed separately from
+# the runnable application.  Components consume the exported target instead of
+# searching arbitrary build trees for a Core DLL/import library pair.
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+set(_serein_scope_sdk_cmake_dir "${CMAKE_INSTALL_LIBDIR}/cmake/SereinScopeCore")
+configure_package_config_file(
+    cmake/SereinScopeCoreConfig.cmake.in
+    "${CMAKE_CURRENT_BINARY_DIR}/SereinScopeCoreConfig.cmake"
+    INSTALL_DESTINATION "${_serein_scope_sdk_cmake_dir}"
+)
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/SereinScopeCoreConfigVersion.cmake"
+    VERSION "${SEREIN_SCOPE_CORE_VERSION}"
+    COMPATIBILITY ExactVersion
+)
+configure_file(cmake/SDK_INFO.json.in
+    "${CMAKE_CURRENT_BINARY_DIR}/SDK_INFO.json" @ONLY)
+
+install(TARGETS serein_scope_core EXPORT SereinScopeCoreTargets
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT SDK
+    LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT SDK
+    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT SDK
+)
+install(DIRECTORY include/serein
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+    COMPONENT SDK
+    FILES_MATCHING PATTERN "*.h"
+)
+install(EXPORT SereinScopeCoreTargets
+    FILE SereinScopeCoreTargets.cmake
+    NAMESPACE SereinScopeCore::
+    DESTINATION "${_serein_scope_sdk_cmake_dir}"
+    COMPONENT SDK
+)
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/SereinScopeCoreConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/SereinScopeCoreConfigVersion.cmake"
+    DESTINATION "${_serein_scope_sdk_cmake_dir}"
+    COMPONENT SDK
+)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/SDK_INFO.json"
+    DESTINATION "."
+    COMPONENT SDK
+)
+install(FILES "${PROJECT_SOURCE_DIR}/docs/plugin_development.md"
+    DESTINATION "."
+    RENAME README.md
+    COMPONENT SDK
+)
+install(FILES "${PROJECT_SOURCE_DIR}/LICENSE"
+    DESTINATION "."
+    COMPONENT SDK
+)
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/tools/component_sdk/"
+    DESTINATION "examples/component_sdk"
+    COMPONENT SDK
+    FILES_MATCHING
+    PATTERN "*.txt" PATTERN "*.md" PATTERN "*.h"
+    PATTERN "*.cpp" PATTERN "*.json"
 )

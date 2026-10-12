@@ -16,6 +16,7 @@ struct ComponentSnapshot {
     QString packagePath;
     QString error;
     bool loaded = false;
+    QString installId; // 宿主安装项标识；原插件仍使用 metadata.id
 };
 
 class ComponentManager final : public QObject {
@@ -38,7 +39,12 @@ public:
     void discover();
     void importPackagesFrom(const QString &dirPath);
     void restorePreferredComponents();
-    QString importPackage(const QString &sourcePath, QString *error = nullptr);
+    enum class ImportMode { RejectConflict, Replace, KeepBoth };
+    [[nodiscard]] PluginMetadata inspectPackage(const QString &sourcePath,
+                                                QString *error = nullptr) const;
+    QString importPackage(const QString &sourcePath, QString *error = nullptr,
+                          ImportMode mode = ImportMode::RejectConflict,
+                          const QString &replaceId = {});
     bool load(const QString &id, QString *error = nullptr, bool remember = true);
     bool unload(const QString &id, QString *error = nullptr, bool remember = true);
     bool removeInstalled(const QString &id, QString *error = nullptr);
@@ -48,6 +54,7 @@ signals:
 
 private:
     struct ComponentRecord {
+        QString installId;
         PluginMetadata metadata;
         QString packagePath; // 插件库(.sscomponent)文件路径
         QString packageDir;  // 插件包目录(自包含目录组件时用于 DLL 搜索路径)

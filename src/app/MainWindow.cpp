@@ -726,7 +726,7 @@ MainWindow::MainWindow(QWidget *parent)
     }
     if (QCoreApplication::arguments().contains(QStringLiteral("--qa-open-all-components"))) {
         for (const ComponentSnapshot &component : m_components->components()) {
-            if (component.loaded) activateComponent(component.metadata.id, false);
+            if (component.loaded) activateComponent(component.installId, false);
         }
         // Opening every workspace must not change the page selected by the
         // acceptance command.  Otherwise the last alphabetic plugin hides
@@ -776,7 +776,7 @@ MainWindow::~MainWindow()
     for (const auto &workspace : m_workspaces) openIds.append(workspace->componentId);
     for (const QString &id : openIds) closeWorkspace(id);
     for (const ComponentSnapshot &component : m_components->components()) {
-        if (component.loaded) m_components->unload(component.metadata.id, nullptr, false);
+        if (component.loaded) m_components->unload(component.installId, nullptr, false);
     }
 }
 
@@ -1709,7 +1709,51 @@ void MainWindow::importComponent()
         tr("Serein 插件 (*.sscomponent);;组件压缩包 (*.zip);;动态插件 (*.dll *.so *.dylib);;所有文件 (*)"));
     if (source.isEmpty()) return;
     QString error;
-    const QString id = m_components->importPackage(source, &error);
+    const PluginMetadata incoming = m_components->inspectPackage(source, &error);
+    if (incoming.id.isEmpty()) {
+        QMessageBox::warning(this, tr("导入失败"), error);
+        return;
+    }
+    QList<ComponentSnapshot> matches;
+    for (const ComponentSnapshot &component : m_components->components()) {
+        if (component.metadata.id == incoming.id) matches.append(component);
+    }
+    ComponentManager::ImportMode mode = ComponentManager::ImportMode::Replace;
+    QString replaceId;
+    if (!matches.isEmpty()) {
+        // 优先呈现正在使用的版本；否则选择原始安装项。
+        auto current = matches.cbegin();
+        for (auto it = matches.cbegin(); it != matches.cend(); ++it) {
+            if (it->loaded || (current->loaded == false
+                               && it->installId == incoming.id)) current = it;
+        }
+        replaceId = current->installId;
+        QMessageBox choice(this);
+        choice.setWindowTitle(tr("发现同一插件"));
+        choice.setIcon(QMessageBox::Question);
+        choice.setText(tr("是否替代当前插件：%1？").arg(incoming.name));
+        choice.setInformativeText(
+            tr("插件 ID：%1\n当前版本：%2%3\n导入版本：%4")
+                .arg(incoming.id, current->metadata.version,
+                     current->loaded ? tr("（运行中，替换前需先卸载）") : QString(),
+                     incoming.version));
+        auto *replace = choice.addButton(tr("是（替代当前插件）"), QMessageBox::AcceptRole);
+        auto *create = choice.addButton(tr("否（新建插件）"), QMessageBox::ActionRole);
+        auto *cancel = choice.addButton(tr("取消"), QMessageBox::RejectRole);
+        if (std::any_of(matches.cbegin(), matches.cend(),
+                        [&incoming](const ComponentSnapshot &component) {
+                            return component.metadata.version == incoming.version;
+                        })) create->setEnabled(false);
+        choice.setDefaultButton(qobject_cast<QPushButton *>(cancel));
+        choice.exec();
+        if (choice.clickedButton() == create) {
+            mode = ComponentManager::ImportMode::KeepBoth;
+            replaceId.clear();
+        } else if (choice.clickedButton() != replace) {
+            return;
+        }
+    }
+    const QString id = m_components->importPackage(source, &error, mode, replaceId);
     if (id.isEmpty()) {
         QMessageBox::warning(this, tr("导入失败"), error);
         return;
@@ -2014,8 +2058,9 @@ void MainWindow::rebuildCards(QGridLayout *grid, const bool loadedOnly,
     int index = 0;
     for (const ComponentSnapshot &component : m_components->components()) {
         if (loadedOnly && !component.loaded) continue;
-        auto *card = new PluginCard(component.metadata, component.loaded,
-                                    isWorkspaceOpen(component.metadata.id),
+        auto *card = new PluginCard(component.installId, component.metadata,
+                                    component.loaded,
+                                    isWorkspaceOpen(component.installId),
                                     managementActions);
         // Card actions can rebuild both grids and delete the sending card.
         // Let the button event return first and copy the component id into the
@@ -2226,8 +2271,9 @@ void MainWindow::requestRemove(const QString &componentId)
 {
     const ComponentSnapshot component = m_components->component(componentId);
     if (QMessageBox::question(this, tr("移除插件"),
-            tr("确定从本机插件仓库移除“%1”吗？\n原始插件包不会被删除。")
-                .arg(component.metadata.name)) != QMessageBox::Yes) {
+            tr("确定从本机插件仓库移除“%1”吗？\n该安装项及其文件将被删除。")
+                .arg(component.metadata.name + QStringLiteral(" v")
+                     + component.metadata.version)) != QMessageBox::Yes) {
         return;
     }
     QString error;

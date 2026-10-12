@@ -49,12 +49,10 @@ T384CalibrationPage::T384CalibrationPage(QWidget *parent) : QWidget(parent) {
     m_contextPanel = new QWidget(this);
     auto *layout = new QVBoxLayout(m_contextPanel);
     layout->setContentsMargins(8, 8, 8, 8); layout->setSpacing(8);
-    auto *title = new QLabel(tr("T256/T384/T640 产测双点标定"), m_contextPanel);
+    auto *title = new QLabel(tr("两点标定"), m_contextPanel);
     title->setObjectName(QStringLiteral("pageTitle")); layout->addWidget(title);
     auto *warning = new QLabel(
-        tr("按顺序操作：黑体稳定并覆盖中心ROI后采集0°C，再采集50°C；"
-           "两点质量门通过后自动停流、写入A/B槽并回读验证。"
-           "这是experimental / non-OEM模型。"),
+        tr("黑体稳定后，依次采集 0°C 和 50°C。完成后自动保存并校验。"),
         m_contextPanel);
     warning->setObjectName(QStringLiteral("pageSubtitle")); warning->setWordWrap(true); layout->addWidget(warning);
     auto *buttons = new QGridLayout;
@@ -140,7 +138,13 @@ void T384CalibrationPage::ingestFrame(const QByteArray &frame, int w, int h,
     }
     if ((m_state == State::CapturingZero || m_state == State::CapturingHigh) &&
         (w != m_frameWidth || h != m_frameHeight)) {
-        m_qualityReason = tr("采集中分辨率变化，已丢弃本次采集"); resetCapture(); updateUi(); return;
+        m_captureTimer.stop();
+        m_qualityReason = tr("采集中分辨率变化，当前温点作废");
+        m_state = State::QualityFailed;
+        m_lastEvidence = buildEvidenceJson(QStringLiteral("profile_changed_failed"));
+        emit evidenceCaptured(m_lastEvidence);
+        updateUi();
+        return;
     }
     QSet<quint32> *sequences = m_state == State::CapturingZero ? &m_zeroSequences :
                                m_state == State::CapturingHigh ? &m_highSequences : nullptr;
@@ -151,8 +155,11 @@ void T384CalibrationPage::ingestFrame(const QByteArray &frame, int w, int h,
             return;
         }
         if (m_lastSequence != 0 && sequence < m_lastSequence) {
+            m_captureTimer.stop();
             m_qualityReason = tr("检测到逆序帧，当前采集失败");
             m_state = State::QualityFailed;
+            m_lastEvidence = buildEvidenceJson(QStringLiteral("sequence_failed"));
+            emit evidenceCaptured(m_lastEvidence);
             updateUi();
             return;
         }
@@ -194,6 +201,7 @@ void T384CalibrationPage::startZeroCapture() {
     m_zeroSamples.clear(); m_highSamples.clear(); m_zeroSequences.clear();
     m_highSequences.clear(); m_sequenceGaps = 0; m_lastSequence = 0;
     m_pendingPacket.clear(); m_modelEnabled = false; m_qualityReason.clear();
+    m_runIdentity.clear();
     m_zeroBefore = {}; m_zeroAfter = {}; m_highBefore = {}; m_highAfter = {};
     m_state = State::AwaitingZeroBefore;
     emit boundaryStateRequested(QStringLiteral("low-before"));
@@ -221,6 +229,16 @@ void T384CalibrationPage::onBoundaryStateReady(
     }
     const QJsonObject state = QJsonObject::fromVariantMap(snapshot);
     if (tag == QStringLiteral("low-before") && m_state == State::AwaitingZeroBefore) {
+        m_runIdentity = QByteArray::fromHex(
+            state.value(QStringLiteral("identity_sha256_hex")).toString().toLatin1());
+        if (m_runIdentity.size() != 32) {
+            m_qualityReason = tr("采集前设备身份无效");
+            m_state = State::QualityFailed;
+            m_lastEvidence = buildEvidenceJson(QStringLiteral("identity_failed"));
+            emit evidenceCaptured(m_lastEvidence);
+            updateUi();
+            return;
+        }
         m_zeroBefore = state; m_state = State::CapturingZero;
         m_captureTimer.start(15000);
     } else if (tag == QStringLiteral("low-after") && m_state == State::AwaitingZeroAfter) {
@@ -234,6 +252,15 @@ void T384CalibrationPage::onBoundaryStateReady(
             m_state = State::Idle;
         }
     } else if (tag == QStringLiteral("high-before") && m_state == State::AwaitingHighBefore) {
+        if (state.value(QStringLiteral("identity_sha256_hex")).toString().toLatin1()
+                != m_runIdentity.toHex()) {
+            m_qualityReason = tr("0°C与50°C设备身份不一致");
+            m_state = State::QualityFailed;
+            m_lastEvidence = buildEvidenceJson(QStringLiteral("high_identity_failed"));
+            emit evidenceCaptured(m_lastEvidence);
+            updateUi();
+            return;
+        }
         m_highBefore = state; m_state = State::CapturingHigh;
         m_captureTimer.start(15000);
     } else if (tag == QStringLiteral("high-after") && m_state == State::AwaitingHighAfter) {
@@ -266,6 +293,18 @@ void T384CalibrationPage::onTransportInterrupted(const QString &message)
     updateUi();
 }
 
+void T384CalibrationPage::invalidateCapturedPoints()
+{
+    // A K change invalidates earlier samples. Keep the displayed runtime
+    // coefficients and device Flash untouched; require fresh point captures.
+    m_zeroSamples.clear(); m_highSamples.clear();
+    m_zeroSequences.clear(); m_highSequences.clear();
+    m_zeroBefore = {}; m_zeroAfter = {}; m_highBefore = {}; m_highAfter = {};
+    m_pendingPacket.clear(); m_runIdentity.clear();
+    m_state = State::Idle;
+    updateUi();
+}
+
 void T384CalibrationPage::setRuntimeModel(const bool enabled,
                                           const double zeroRaw,
                                           const double countsPerC)
@@ -284,11 +323,11 @@ bool T384CalibrationPage::validateBoundaryPair(const QJsonObject &before,
                                                const QJsonObject &after,
                                                QString *reason) const
 {
-    if (before.isEmpty() || after.isEmpty()
+    if (before.isEmpty() || after.isEmpty() || m_runIdentity.size() != 32
         || before.value(QStringLiteral("identity_sha256_hex"))
                != after.value(QStringLiteral("identity_sha256_hex"))
         || before.value(QStringLiteral("identity_sha256_hex")).toString().toLatin1()
-               != m_deviceIdentity.toHex()) {
+               != m_runIdentity.toHex()) {
         *reason = tr("采集前后设备身份不一致"); return false;
     }
     const QString beforeGain = before.value(QStringLiteral("gain")).toString();
@@ -334,11 +373,11 @@ bool T384CalibrationPage::qualityGate(QString *reason) {
 }
 QByteArray T384CalibrationPage::buildModelPacket() const {
     const auto profile = thermalProfile(m_frameWidth, m_frameHeight);
-    if (!profile || m_deviceIdentity.size() != 32) return {};
+    if (!profile || m_runIdentity.size() != 32) return {};
     CalibrationPacket packet;
     packet.manifest.calibrationId = quint32(QDateTime::currentSecsSinceEpoch()) | 1u;
     packet.manifest.profile = *profile;
-    packet.manifest.identity = m_deviceIdentity;
+    packet.manifest.identity = m_runIdentity;
     const QString gain = m_zeroBefore.value(QStringLiteral("gain")).toString();
     packet.manifest.gain = gain == QStringLiteral("high") ? 1u
         : gain == QStringLiteral("low") ? 2u : 0xffu;
@@ -362,7 +401,8 @@ QByteArray T384CalibrationPage::buildEvidenceJson(const QString &outcome) const 
         {"profile",thermalProfile(m_frameWidth,m_frameHeight)
                        ? profileName(*thermalProfile(m_frameWidth,m_frameHeight))
                        : QStringLiteral("unsupported")},
-        {"identity_sha256_hex",QString::fromLatin1(m_deviceIdentity.toHex())},
+        {"identity_sha256_hex",QString::fromLatin1(
+             (m_runIdentity.isEmpty() ? m_deviceIdentity : m_runIdentity).toHex())},
         {"roi","center-16x16"},{"distance_m",0.01},{"emissivity",0.98},
         {"gain",gain},{"gain_verified",gainVerified},
         {"low_c",kLowC},{"high_c",kHighC},
@@ -384,7 +424,7 @@ void T384CalibrationPage::evaluateAndAutoApply() {
         m_qualityReason = reason; m_state = State::QualityFailed;
         m_lastEvidence = buildEvidenceJson(QStringLiteral("quality_failed")); emit evidenceCaptured(m_lastEvidence); return;
     }
-    if (m_deviceIdentity.size() != 32) {
+    if (m_runIdentity.size() != 32) {
         m_qualityReason = tr("未获得32字节 SHA-256 设备身份，禁止写入"); m_state = State::QualityFailed;
         m_lastEvidence = buildEvidenceJson(QStringLiteral("identity_failed")); emit evidenceCaptured(m_lastEvidence); return;
     }
@@ -415,6 +455,7 @@ void T384CalibrationPage::resetCapture() {
     m_zeroSequences.clear(); m_highSequences.clear(); m_sequenceGaps=0;
     m_lastSequence=0; m_lastCaptureMs=0; m_pendingPacket.clear();
     m_zeroBefore={}; m_zeroAfter={}; m_highBefore={}; m_highAfter={};
+    m_runIdentity.clear();
     m_modelEnabled=false; m_state=State::Idle;
 }
 void T384CalibrationPage::restartCalibration() { resetCapture(); m_qualityReason.clear(); updateUi(); }
@@ -428,12 +469,14 @@ void T384CalibrationPage::updateUi() {
         || m_state == State::CapturingZero || m_state == State::AwaitingZeroAfter
         || m_state == State::AwaitingHighBefore || m_state == State::CapturingHigh
         || m_state == State::AwaitingHighAfter || m_state == State::Applying;
+    emit operationActiveChanged(busy || m_state == State::WriteUncertain);
     m_zeroButton->setEnabled(!busy && m_state != State::WriteUncertain
                              && m_deviceIdentity.size() == 32
                              && supportedProfile(m_frameWidth, m_frameHeight));
-    m_highButton->setEnabled(!busy && m_zeroSamples.size() == kSamplesPerPoint && m_state != State::WriteUncertain);
+    m_highButton->setEnabled(m_state == State::Idle
+                             && m_zeroSamples.size() == kSamplesPerPoint);
     m_importButton->setEnabled(!busy); m_exportButton->setEnabled(!busy);
-    m_restartButton->setEnabled(m_state != State::Applying && m_state != State::WriteUncertain);
+    m_restartButton->setEnabled(!busy && m_state != State::WriteUncertain);
     m_verifyButton->setEnabled(m_state == State::WriteUncertain && !m_pendingPacket.isEmpty());
     QString status;
     if (m_state == State::AwaitingZeroBefore) status=tr("正在核验0°C采集前gain/FFC/Vtemp/快门状态");
@@ -442,14 +485,20 @@ void T384CalibrationPage::updateUi() {
     else if (m_state == State::AwaitingHighBefore) status=tr("正在核验50°C采集前gain/FFC/Vtemp/快门状态");
     else if (m_state == State::CapturingHigh) status=tr("采集中：50°C，等待30个完整Y16BE帧");
     else if (m_state == State::AwaitingHighAfter) status=tr("正在核验50°C采集后状态");
-    else if (m_state == State::Applying) status=tr("质量门通过，正在自动写入并验证；所有冲突操作已禁用");
-    else if (m_state == State::Applied) status=tr("写入并回读验证通过（experimental / non-OEM）");
-    else if (m_state == State::WriteUncertain) status=tr("WRITE UNCERTAIN：禁止重写；请重新连接后只读验证");
-    else if (m_state == State::QualityFailed) status=tr("未通过：%1；请重新标定").arg(m_qualityReason);
+    else if (m_state == State::Applying) status=tr("正在保存并校验…");
+    else if (m_state == State::Applied) status=tr("两点模型已保存并校验，精度尚未认证");
+    else if (m_state == State::WriteUncertain) status=tr("写入结果待确认，请只读核验");
+    else if (m_state == State::QualityFailed) status=
+        m_qualityReason.contains(tr("状态快照失败"))
+            ? tr("设备状态读取失败；请检查连接后重试")
+            : m_qualityReason.contains(tr("采集期间数据流中断"))
+                ? tr("数据流中断，当前温点作废；请重新标定")
+            : tr("标定未完成：%1").arg(m_qualityReason);
     else if (m_deviceIdentity.size() != 32 || !supportedProfile(m_frameWidth, m_frameHeight))
         status=tr("等待真实T256/T384/T640 Y16设备身份与完整帧");
-    else status=tr("就绪：先采集0°C，再采集50°C；通过后自动写入");
+    else status=tr("就绪：依次采集 0°C 和 50°C");
     m_status->setText(status);
+    m_status->setToolTip(m_qualityReason);
     m_stats->setText(tr("%1 · ROI中心16×16 · low=%2±%3 high=%4±%5 counts/°C=%6 · 整帧跳号=%7")
         .arg(profileLabel(m_frameWidth,m_frameHeight)).arg(m_zeroRaw,0,'f',3).arg(m_zeroStdDev,0,'f',3)
         .arg(m_highRaw,0,'f',3).arg(m_highStdDev,0,'f',3).arg(m_countsPerC,0,'f',3)

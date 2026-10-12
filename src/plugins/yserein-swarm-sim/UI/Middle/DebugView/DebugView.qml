@@ -9,6 +9,20 @@ import Frontend.Show3D
 import Frontend.Vehicle
 
 Rectangle {
+    id: root
+    readonly property var mockController: Frontend.mockVehicleController
+    readonly property var playerController: Frontend.droneShowPlayerController
+    readonly property bool useBoxDance: mockController.danceViewActive
+    readonly property int playbackState: useBoxDance ? mockController.dancePlaybackState
+                                                    : playerController.playbackState
+    readonly property bool canPlay: useBoxDance ? mockController.danceCanPlay
+                                              : playerController.canPlay
+    readonly property string playbackStatus: mockController.clearing ? qsTr("正在清除…")
+            : playbackState === 1 ? qsTr("正在播放")
+            : playbackState === 2 ? qsTr("已暂停")
+            : canPlay ? qsTr("已就绪")
+            : useBoxDance ? qsTr("等待模拟机就绪") : qsTr("等待舞步")
+
     color: Theme.colors.pageBackground
 
     ColumnLayout {
@@ -47,8 +61,7 @@ Rectangle {
                 Label { text: Frontend.mockVehicleController.count; color: Theme.colors.primaryText; font.pixelSize: 13; font.weight: Font.Medium }
                 Label { text: qsTr("播放状态"); color: Theme.colors.secondaryText; font.pixelSize: 12 }
                 Label {
-                    text: Frontend.droneShowPlayerController.playbackState === 1 ? qsTr("正在播放")
-                          : (Frontend.droneShowPlayerController.canPlay ? qsTr("已就绪") : qsTr("等待舞步"))
+                    text: root.playbackStatus
                     color: Theme.colors.primaryText
                     font.pixelSize: 13
                     font.weight: Font.Medium

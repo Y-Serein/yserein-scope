@@ -52,7 +52,7 @@ QVariant QuickComponentModel::data(const QModelIndex &index, const int role) con
     }
     const ComponentSnapshot &component = m_components.at(index.row());
     switch (role) {
-    case IdRole: return component.metadata.id;
+    case IdRole: return component.installId;
     case NameRole: return component.metadata.name;
     case DescriptionRole: return component.metadata.description;
     case VersionRole: return component.metadata.version;
@@ -117,7 +117,7 @@ QuickWorkbenchController::~QuickWorkbenchController()
     for (const QString &id : ids) closeWorkspace(id);
     if (!m_components) return;
     for (const ComponentSnapshot &component : m_components->components()) {
-        if (component.loaded) m_components->unload(component.metadata.id, nullptr, false);
+        if (component.loaded) m_components->unload(component.installId, nullptr, false);
     }
 }
 
@@ -395,11 +395,52 @@ bool QuickWorkbenchController::unloadComponent(const QString &componentId)
     return true;
 }
 
-bool QuickWorkbenchController::importComponent(const QUrl &sourceUrl)
+bool QuickWorkbenchController::removeComponent(const QString &componentId)
+{
+    QString error;
+    if (!m_components->removeInstalled(componentId, &error)) {
+        emit operationFailed(tr("移除失败"), error);
+        return false;
+    }
+    refreshComponents();
+    return true;
+}
+
+QVariantMap QuickWorkbenchController::inspectComponentImport(const QUrl &sourceUrl) const
+{
+    QString error;
+    const PluginMetadata incoming = m_components->inspectPackage(localPath(sourceUrl), &error);
+    if (incoming.id.isEmpty()) return {{QStringLiteral("error"), error}};
+    ComponentSnapshot current;
+    bool sameVersion = false;
+    int matches = 0;
+    for (const ComponentSnapshot &component : m_components->components()) {
+        if (component.metadata.id != incoming.id) continue;
+        ++matches;
+        if (component.metadata.version == incoming.version) sameVersion = true;
+        if (current.installId.isEmpty() || component.loaded
+            || (!current.loaded && component.installId == incoming.id)) current = component;
+    }
+    return {{QStringLiteral("id"), incoming.id},
+            {QStringLiteral("name"), incoming.name},
+            {QStringLiteral("version"), incoming.version},
+            {QStringLiteral("existingCount"), matches},
+            {QStringLiteral("currentVersion"), current.metadata.version},
+            {QStringLiteral("currentLoaded"), current.loaded},
+            {QStringLiteral("replaceId"), current.installId},
+            {QStringLiteral("sameVersion"), sameVersion}};
+}
+
+bool QuickWorkbenchController::importComponent(const QUrl &sourceUrl,
+                                               const int mode,
+                                               const QString &replaceId)
 {
     const QString path = localPath(sourceUrl);
     QString error;
-    const QString id = m_components->importPackage(path, &error);
+    const QString id = m_components->importPackage(
+        path, &error, mode == 1 ? ComponentManager::ImportMode::KeepBoth
+                                : ComponentManager::ImportMode::Replace,
+        replaceId);
     if (id.isEmpty()) {
         emit operationFailed(tr("导入失败"), error);
         return false;

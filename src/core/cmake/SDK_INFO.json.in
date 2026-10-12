@@ -1,0 +1,10 @@
+{
+  "coreVersion": "@SEREIN_SCOPE_CORE_VERSION@",
+  "pluginAbi": 2,
+  "qtVersion": "@Qt6_VERSION@",
+  "compilerId": "@CMAKE_CXX_COMPILER_ID@",
+  "compilerVersion": "@CMAKE_CXX_COMPILER_VERSION@",
+  "system": "@CMAKE_SYSTEM_NAME@",
+  "processor": "@CMAKE_SYSTEM_PROCESSOR@",
+  "pointerBytes": @CMAKE_SIZEOF_VOID_P@
+}

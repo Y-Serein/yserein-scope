@@ -1,6 +1,6 @@
 # Serein Scope
 
-Serein Scope 是一个使用 **C++20 + Qt 6** 实现的可扩展桌面调试仪器。产品定位接近 VOFA+ 的通用数据工作台，采用 Serein 自己的纯白分层界面和设备专项插件模型。
+Serein Scope 是一个使用 **C++20 + Qt 6** 实现的可扩展桌面调试仪器，提供通用串口工作台和设备专项组件。
 
 当前版本：`1.0.1`
 
@@ -57,14 +57,29 @@ out/yserein-scope/
 ├── libserein_scope_core.dll
 ├── Qt6*.dll / platforms/ / qml/ ...
 ├── Components/
-│   ├── serial-scope.sscomponent
-│   ├── tn160-thermal.sscomponent
-│   ├── tn160-thermal-ncm.sscomponent
-│   └── yserein-hmi.sscomponent
+│   ├── serial-scope/serial-scope.sscomponent
+│   ├── tn160-thermal/tn160-thermal.sscomponent
+│   ├── tn160-thermal-ncm/tn160-thermal-ncm.sscomponent
+│   ├── t384/SereinScope.T384.sscomponent
+│   ├── yserein-hmi/yserein-hmi.sscomponent
+│   ├── yserein-swarm-sim/yserein-swarm-sim.sscomponent
+│   └── yserein-universe/yserein-universe.sscomponent
 └── SHA256SUMS.txt
 ```
 
 `out/run-win/` 只保留当前已验收的运行基线，构建脚本不会覆盖它。
+
+需要只编译一个组件时，在同一脚本后加 `-BuildOnly t384`（可替换为注册的组件
+ID）；它只构建该 CMake 目标及依赖，不更新候选、组件 ZIP 或安装包。
+`-Components t384` 则用于选择完整交付中包含的组件，仍执行全量编译。
+
+同一脚本还会安装 Core SDK 到 `out/component-sdk/`，以独立模板构建检查
+公开头文件、共享库、导入库和 CMake 包配置，随后生成 `out/component-sdk.zip`。
+需要只产出 SDK 时加 `-SdkOnly`；它只构建 Core，校验解压后的 SDK 示例，
+不更新候选、组件包或安装包。SDK 包内的 `SDK_INFO.json` 记录工具链与 ABI，
+`SHA256SUMS.txt` 校验文件，ZIP 旁还有摘要文件。
+外部组件从 SDK 包的 `examples/component_sdk/` 起步，使用
+`SEREIN_SCOPE_SDK_PREFIX` 定位 SDK；详见 [SDK 模板说明](tools/component_sdk/README.md)。
 
 ## Linux开发构建
 
@@ -84,18 +99,20 @@ src/
 ├── app/                          # 插件仓库、生命周期、宿主、Dock和Serein主题
 └── plugins/
     ├── serial_scope/             # 通用串口插件包
-    └── tn160/                    # TN160 专项插件包
-docs/
-├── architecture.md
-└── plugin_development.md
+    ├── tn160/、tn160_ncm/        # TN160 组件
+    ├── t384/、thermal_workbench/ # T256/T384/T640 与共用热成像工作台
+    ├── yserein-hmi/              # 离线 HMI 设计器
+    ├── yserein-swarm-sim/        # 编队模拟器
+    └── yserein-universe/         # 轨道可视化流程
+tools/
+├── component_sdk/               # 第三方组件模板
+└── windows_user_action.ps1      # Windows 构建与打包入口
 ```
 
 ## 当前边界
 
 - `.sscomponent` 是原生动态库，拥有与宿主进程相同的系统权限；当前没有数字签名，只应导入可信组件。
 - ABI 2 插件必须使用与宿主兼容的 Qt、编译器、CPU 架构和 Serein Core 构建；ABI 1 会被明确拒绝。
-- TN160 实时诊断和 Serial Scope 均使用原生组件画布；通用组件注册、拖入组件库、录制回放和标签页独立窗口属于后续阶段。
+- Widgets 宿主通过公共 ABI 2 和可选 UI Provider 接入内置组件；QML 控制器仍有 Serial/TN160 的专用页面与控件名依赖，不能视为任意组件通用宿主。
 - C++插件必须与宿主使用兼容的Qt、编译器和Serein插件ABI构建；`interfaceVersion`不匹配会拒绝加载。
 - 固件、串口和标定流程仍需真实 Windows 设备验证；发布脚本保留组件生命周期 smoke 检查。
-
-详细设计见 [architecture.md](docs/architecture.md) 和 [plugin_development.md](docs/plugin_development.md)。

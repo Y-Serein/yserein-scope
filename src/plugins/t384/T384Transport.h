@@ -84,6 +84,8 @@ private:
     [[nodiscard]] QUrl endpointUrl(const QString &path) const;
     [[nodiscard]] static QUrl normalizeEndpoint(const QString &endpoint);
     static QVariantMap parseDiagnostics(const QByteArray &body);
+    void requestModuleStateStreamRelease();
+    void startModuleStateRead();
     void requestModuleStateStatus();
     void requestModuleStateData();
     void finishModuleState(bool success, const QVariantMap &snapshot,
@@ -102,8 +104,10 @@ private:
     QTimer m_initialRequestTimer;
     QTimer m_connectDeadlineTimer;
     QTimer m_moduleStatePollTimer;
+    QTimer m_moduleStateReleaseTimer;
     QTimer m_moduleStateDeadlineTimer;
     QElapsedTimer m_connectElapsed;
+    QElapsedTimer m_moduleStateReleaseElapsed;
     QUrl m_endpoint = QUrl(QStringLiteral("http://192.168.17.1"));
     QVariantMap m_diagnostics;
     QString m_state = QStringLiteral("disconnected");

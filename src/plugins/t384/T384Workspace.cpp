@@ -1,5 +1,6 @@
 #include "T384Workspace.h"
 #include "T384CalibrationPage.h"
+#include "T384OemKPanel.h"
 #include "T384CalibrationProtocol.h"
 #include "T384CalibrationTransaction.h"
 #include "T384Engine.h"
@@ -16,6 +17,7 @@
 #include <QtCore/QDir>
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
+#include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QSaveFile>
@@ -105,7 +107,33 @@ T384Workspace::T384Workspace(IHostServices *host, QWidget *parent)
     presentation.outputPanel.margins = WorkspacePanelMargins::Flush;
     presentation.outputPanel.headerControl = m_outputTabs;
     m_uiProvider->setContext(std::move(ui), presentation);
+    connect(m_endpoint, &QLineEdit::textChanged, m_oemK, &T384OemKPanel::setEndpoint);
+    connect(m_calibration, &T384CalibrationPage::operationActiveChanged,
+            m_oemK, [this](bool active) { m_oemK->setEnabled(!active); });
+    connect(m_oemK, &T384OemKPanel::record, this, [this](const QString &message) {
+        appendLog(QStringLiteral("info"), message);
+    });
+    connect(m_oemK, &T384OemKPanel::availabilityChanged, this, [this] {
+        const bool busy = m_oemK->busy();
+        const bool held = busy || m_oemK->holdsCalibration();
+        m_calibration->contextPanel()->setEnabled(!held);
+        m_calibration->resultPanel()->setEnabled(!held);
+        m_endpoint->setEnabled(!held);
+        m_connect->setEnabled(!busy);
+        m_stop->setEnabled(!busy && m_transport->isActive());
+    });
+    connect(m_oemK, &T384OemKPanel::commandSubmitted,
+            m_calibration, &T384CalibrationPage::invalidateCapturedPoints);
+    connect(m_oemK, &T384OemKPanel::prepareCommand, this, [this] {
+        m_transport->stop();
+    });
+    connect(m_oemK, &T384OemKPanel::operationFinished, this, [this](bool resume) {
+        if (resume) QTimer::singleShot(250, this, [this] {
+            if (!m_oemK->busy()) m_transport->start(m_endpoint->text());
+        });
+    });
     connect(m_connect, &QPushButton::clicked, this, [this] {
+        m_lastLoggedRetryReason.clear();
         m_bytesReceived = 0;
         m_framesReceived = 0;
         m_firstSampleTimestampUs = 0;
@@ -117,10 +145,13 @@ T384Workspace::T384Workspace(IHostServices *host, QWidget *parent)
         for (const auto &trend : std::as_const(m_trends))
             if (trend) trend->clear();
         if (m_traffic) m_traffic->setText(tr("接收：0 B · 完整帧：0"));
-        if (m_error) m_error->setText(tr("错误：—"));
+        if (m_error) {
+            m_error->clear();
+            m_error->setToolTip({});
+        }
         appendLog(QStringLiteral("info"),
                   tr("开始连接：%1").arg(m_endpoint->text()));
-        m_transport->start(m_endpoint->text());
+        if (!m_oemK->busy()) m_transport->start(m_endpoint->text());
     });
     connect(m_stop, &QPushButton::clicked, this, [this] {
         m_transport->stop();
@@ -135,27 +166,49 @@ T384Workspace::T384Workspace(IHostServices *host, QWidget *parent)
         if (m_status) m_status->setText(shown);
         if (m_connect) m_connect->setText(
             state == QStringLiteral("streaming") ? tr("重新连接") : tr("连接"));
-        if (m_stop) m_stop->setEnabled(state != QStringLiteral("disconnected"));
+        if (m_stop) m_stop->setEnabled(state != QStringLiteral("disconnected") && !m_oemK->busy());
         updateInspector();
         appendLog(QStringLiteral("info"), tr("状态：%1").arg(shown));
         if (m_host) m_host->setStatus(tr("T384 · %1").arg(shown));
+        if (state == QStringLiteral("streaming")) {
+            m_lastLoggedRetryReason.clear();
+            if (m_error) {
+                m_error->clear();
+                m_error->setToolTip({});
+            }
+        }
     });
     connect(m_transport, &T384Transport::errorOccurred, this,
             [this](const QString &message) {
-                if (m_error) m_error->setText(tr("错误：%1").arg(message));
+                if (m_error) {
+                    m_error->setText(m_lastLoggedRetryReason.contains(
+                            QStringLiteral("409"))
+                        ? tr("视频流仍被占用，请关闭其他画面后重试")
+                        : tr("连接失败，请检查设备后重试"));
+                    m_error->setToolTip(message);
+                }
                 appendLog(QStringLiteral("error"), message);
-                if (m_host) m_host->setStatus(tr("T384 · %1").arg(message));
+                if (m_host) m_host->setStatus(
+                    tr("T384 · %1").arg(m_error ? m_error->text()
+                                               : tr("连接失败")));
             });
     connect(m_transport, &T384Transport::retryScheduled, this,
             [this](const QString &reason, const int delayMs,
                    const int remainingMs) {
-                const QString message = tr("连接重试：%1；%2 ms后重试，剩余%3 ms")
-                                            .arg(reason)
-                                            .arg(delayMs)
-                                            .arg(remainingMs);
-                if (m_error) m_error->setText(message);
+                if (m_error) {
+                    m_error->setText(reason.contains(QStringLiteral("409"))
+                        || reason.contains(tr("占用"))
+                        ? tr("视频流仍被占用，正在等待释放")
+                        : tr("正在恢复连接…"));
+                    m_error->setToolTip(reason);
+                }
                 m_calibration->onTransportInterrupted(reason);
-                appendLog(QStringLiteral("warning"), message);
+                if (m_lastLoggedRetryReason != reason) {
+                    appendLog(QStringLiteral("warning"),
+                              tr("连接重试：%1；%2 ms后重试，剩余%3 ms")
+                                  .arg(reason).arg(delayMs).arg(remainingMs));
+                    m_lastLoggedRetryReason = reason;
+                }
             });
     connect(m_transport, &T384Transport::bytesReceived, this,
             [this](const qint64 count) {
@@ -219,23 +272,37 @@ T384Workspace::T384Workspace(IHostServices *host, QWidget *parent)
                 m_pendingCalibrationPacket.clear();
                 m_pendingCalibrationEvidence.clear();
                 m_calibrationAutoWritePending = false;
+                appendLog(QStringLiteral("info"), tr("开始新一轮两点标定"));
             });
     connect(m_calibration, &T384CalibrationPage::boundaryStateRequested,
             this, [this](const QString &tag) {
+                if (m_connect) m_connect->setEnabled(false);
+                if (m_stop) m_stop->setEnabled(false);
                 m_transport->stop();
                 appendLog(QStringLiteral("info"),
                           tr("停流并读取采集边界状态：%1").arg(tag));
-                QTimer::singleShot(250, m_transport, [this, tag] {
-                    m_transport->requestCalibrationBoundaryState(tag);
-                });
+                m_transport->requestCalibrationBoundaryState(tag);
             });
     connect(m_transport, &T384Transport::calibrationBoundaryStateReady,
             this, [this](const QString &tag, const bool success,
                          const QVariantMap &snapshot, const QString &message) {
+                if (!success) appendLog(QStringLiteral("error"), message);
+                else appendLog(QStringLiteral("info"),
+                               tr("%1：身份 %2 · gain=%3 · FFC=%4 · 快门=%5")
+                                   .arg(tag,
+                                        snapshot.value(QStringLiteral("identity_sha256_hex"))
+                                            .toString().left(12),
+                                        snapshot.value(QStringLiteral("gain")).toString(),
+                                        snapshot.value(QStringLiteral("auto_ffc_enabled"))
+                                            .toBool() ? tr("开") : tr("关"),
+                                        snapshot.value(QStringLiteral("shutter_status"))
+                                            .toString()));
                 m_calibration->onBoundaryStateReady(tag, success, snapshot, message);
-                if (!m_calibrationAutoWritePending) {
+                if (m_connect) m_connect->setEnabled(!m_calibrationAutoWritePending);
+                if (m_stop) m_stop->setEnabled(success && !m_calibrationAutoWritePending);
+                if (success && !m_calibrationAutoWritePending) {
                     QTimer::singleShot(250, this, [this] {
-                        m_transport->start(m_endpoint->text());
+                        if (!m_oemK->busy()) m_transport->start(m_endpoint->text());
                     });
                 }
             });
@@ -243,9 +310,20 @@ T384Workspace::T384Workspace(IHostServices *host, QWidget *parent)
             [this](const QByteArray &evidence) {
                 m_pendingCalibrationEvidence = evidence;
                 const QJsonObject object = QJsonDocument::fromJson(evidence).object();
+                const QString qualityReason = object.value(QStringLiteral("quality_reason"))
+                                                  .toString();
+                const QString outcome = object.value(QStringLiteral("outcome")).toString();
+                if (!qualityReason.isEmpty()
+                    && (outcome.endsWith(QStringLiteral("failed"))
+                        || outcome == QStringLiteral("capture_timeout")
+                        || outcome == QStringLiteral("stream_interrupted")))
+                    appendLog(QStringLiteral("error"), qualityReason);
                 updateCalibrationResult(object,
                                         tr("已记录本轮产测证据，等待后续状态"),
                                         false, false);
+                if (object.value(QStringLiteral("zero_samples")).toArray().isEmpty()
+                    && object.value(QStringLiteral("high_samples")).toArray().isEmpty())
+                    return;
                 if (m_calibrationSessionPath.isEmpty()) {
                     QString error;
                     if (!beginCalibrationArchive({}, evidence, &error))
@@ -318,6 +396,11 @@ void T384Workspace::buildContextPanel()
     m_error->setWordWrap(true);
     m_error->setObjectName(QStringLiteral("pageSubtitle"));
     connection.body->addWidget(m_error);
+    thermal::WorkbenchSection oemK = m_workbenchUi->addContextSection(
+        QStringLiteral("t384OemKSection"), tr("原厂 K 标定 · 65°C"));
+    m_oemK = new T384OemKPanel(oemK.frame);
+    m_oemK->setEndpoint(m_endpoint->text());
+    oemK.body->addWidget(m_oemK);
     thermal::WorkbenchSection calibration = m_workbenchUi->addContextSection(
         QStringLiteral("t384ProductionSection"), tr("生产标定"));
     QWidget *calibrationPanel = m_calibration->contextPanel();
@@ -327,13 +410,13 @@ void T384Workspace::buildContextPanel()
         calibrationPanel->layout()->setContentsMargins(0, 0, 0, 0);
     calibration.body->addWidget(calibrationPanel);
     thermal::WorkbenchSection records = m_workbenchUi->addContextSection(
-        QStringLiteral("t384RecordsSection"), tr("生成记录"));
+        QStringLiteral("t384ProductionRecords"), tr("生成记录"));
     m_log = new QPlainTextEdit(records.frame);
     m_log->setObjectName(QStringLiteral("t384ProductionLog"));
     m_log->setReadOnly(true);
     m_log->setMaximumBlockCount(300);
-    m_log->setMinimumHeight(150);
-    m_log->setPlaceholderText(tr("连接设备后显示诊断和标定记录"));
+    m_log->setMinimumHeight(160);
+    m_log->setPlaceholderText(tr("连接与标定记录"));
     records.body->addWidget(m_log);
     m_workbenchUi->addContextStretch();
     m_contextPanel = m_workbenchUi->contextPanel();
@@ -368,15 +451,6 @@ void T384Workspace::buildInspectorPanel()
     m_workbenchUi->addMetric(link, tr("完整帧 / 接收"), &m_inspectorCompleteFrames);
     m_workbenchUi->addMetric(link, tr("序号缺口"), &m_inspectorSequenceGaps);
 
-    thermal::WorkbenchSection hint = m_workbenchUi->addInspectorSection(
-        QStringLiteral("t384InspectorHint"), tr("数据说明"));
-    auto *text = new QLabel(
-        tr("热图在中央显示；温度仅在设备已加载experimental两点模型后有效。"
-           "完整帧跳号会记录，但半帧、重复帧和逆序帧不会进入标定。"),
-        hint.frame);
-    text->setObjectName(QStringLiteral("pageSubtitle"));
-    text->setWordWrap(true);
-    hint.body->addWidget(text);
     m_workbenchUi->addInspectorStretch();
     m_inspectorPanel = m_workbenchUi->inspectorPanel();
 }
@@ -426,6 +500,7 @@ T384Workspace::~T384Workspace() { shutdown(); }
 
 void T384Workspace::shutdown()
 {
+    if (m_oemK) m_oemK->shutdown();
     if (m_calibrationTransaction) m_calibrationTransaction->shutdown();
     if (m_calibrationHttp) m_calibrationHttp->cancelAll();
     if (m_transport) m_transport->stop();
@@ -526,12 +601,18 @@ void T384Workspace::beginReadOnlyCalibrationVerify(
 void T384Workspace::startCalibrationTransaction(const bool verifyOnly)
 {
     T384CalibrationTransaction::ExpectedDevice expected;
+    const QJsonObject capturedDevice = m_calibration->calibrationDeviceState();
     expected.endpoint = QUrl::fromUserInput(m_endpoint->text().trimmed());
-    expected.pn = m_lastDiagnostics.value(QStringLiteral("mini2.pn")).toString();
-    expected.sn = m_lastDiagnostics.value(QStringLiteral("mini2.sn")).toString();
-    expected.fwHex = m_lastDiagnostics
-                         .value(QStringLiteral("mini2.firmware_version"))
-                         .toString().toUtf8().toHex();
+    expected.pn = capturedDevice.isEmpty()
+        ? m_lastDiagnostics.value(QStringLiteral("mini2.pn")).toString()
+        : capturedDevice.value(QStringLiteral("pn")).toString();
+    expected.sn = capturedDevice.isEmpty()
+        ? m_lastDiagnostics.value(QStringLiteral("mini2.sn")).toString()
+        : capturedDevice.value(QStringLiteral("sn")).toString();
+    expected.fwHex = capturedDevice.isEmpty()
+        ? m_lastDiagnostics.value(QStringLiteral("mini2.firmware_version"))
+              .toString().toUtf8().toHex()
+        : capturedDevice.value(QStringLiteral("fw_hex")).toString();
     expected.profile = currentProfile();
     const bool started = verifyOnly
         ? m_calibrationTransaction->startVerify(expected,
@@ -547,7 +628,7 @@ void T384Workspace::startCalibrationTransaction(const bool verifyOnly)
         if (m_stop) m_stop->setEnabled(true);
         if (!verifyOnly)
             QTimer::singleShot(250, this,
-                               [this] { m_transport->start(m_endpoint->text()); });
+                               [this] { if (!m_oemK->busy()) m_transport->start(m_endpoint->text()); });
     }
 }
 
@@ -583,7 +664,7 @@ void T384Workspace::finishCalibrationTransaction(const int outcomeValue,
     if (m_stop) m_stop->setEnabled(true);
     if (!uncertain) {
         QTimer::singleShot(250, this,
-                           [this] { m_transport->start(m_endpoint->text()); });
+                           [this] { if (!m_oemK->busy()) m_transport->start(m_endpoint->text()); });
     }
 }
 

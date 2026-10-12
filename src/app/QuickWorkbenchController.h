@@ -5,6 +5,7 @@
 #include <QtCore/QAbstractListModel>
 #include <QtCore/QPointer>
 #include <QtCore/QVariantList>
+#include <QtCore/QVariantMap>
 #include <QtGui/QWindow>
 
 #include <memory>
@@ -148,7 +149,10 @@ public:
     Q_INVOKABLE bool openComponent(const QString &componentId);
     Q_INVOKABLE bool closeWorkspace(const QString &componentId);
     Q_INVOKABLE bool unloadComponent(const QString &componentId);
-    Q_INVOKABLE bool importComponent(const QUrl &sourceUrl);
+    Q_INVOKABLE bool removeComponent(const QString &componentId);
+    Q_INVOKABLE QVariantMap inspectComponentImport(const QUrl &sourceUrl) const;
+    Q_INVOKABLE bool importComponent(const QUrl &sourceUrl, int mode,
+                                     const QString &replaceId = {});
     Q_INVOKABLE void scanPorts();
     Q_INVOKABLE void toggleConnection();
     Q_INVOKABLE void startRawCapture(int frameCount);

@@ -32,6 +32,7 @@ namespace serein::scope::t384 {
 class T384Transport;
 class T384Engine;
 class T384CalibrationPage;
+class T384OemKPanel;
 class T384CalibrationTransaction;
 class ThermalView;
 
@@ -85,6 +86,7 @@ private:
     T384Engine *m_engine = nullptr;
     T384Transport *m_transport = nullptr;
     T384CalibrationPage *m_calibration = nullptr;
+    T384OemKPanel *m_oemK = nullptr;
     HttpRequestClient *m_calibrationHttp = nullptr;
     T384CalibrationTransaction *m_calibrationTransaction = nullptr;
     WorkspaceCanvas *m_canvas = nullptr;
@@ -120,6 +122,7 @@ private:
     QByteArray m_pendingCalibrationEvidence;
     QString m_calibrationSessionPath;
     bool m_calibrationAutoWritePending = false;
+    QString m_lastLoggedRetryReason;
     qint64 m_bytesReceived = 0;
     qint64 m_framesReceived = 0;
     qint64 m_firstSampleTimestampUs = 0;

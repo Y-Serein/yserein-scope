@@ -29,12 +29,14 @@ public:
                      quint32 sequence = 0, quint32 captureMs = 0);
     void ingestFrame(const QByteArray &y16be);
     void setDeviceIdentity(const QByteArray &identitySha256);
+    [[nodiscard]] QJsonObject calibrationDeviceState() const { return m_zeroBefore; }
     [[nodiscard]] QWidget *contextPanel() const noexcept { return m_contextPanel; }
     [[nodiscard]] QWidget *resultPanel() const noexcept { return m_resultPanel; }
     [[nodiscard]] QByteArray captureEvidenceJson() const;
 
 signals:
     void calibrationRunStarted();
+    void operationActiveChanged(bool active);
     void modelChanged(bool enabled, double zeroRaw, double countsPerC);
     // Owner must stop stream, backup, write A/B, read back and verify. On
     // ambiguous transport result it must call onAutoApplyFinished(false,true).
@@ -50,6 +52,7 @@ public slots:
                               const QVariantMap &snapshot,
                               const QString &message);
     void onTransportInterrupted(const QString &message);
+    void invalidateCapturedPoints();
     void setRuntimeModel(bool enabled, double zeroRaw, double countsPerC);
 
 private slots:
@@ -105,6 +108,7 @@ private:
     int m_frameWidth = 0;
     int m_frameHeight = 0;
     QByteArray m_deviceIdentity; // SHA-256(PN:SN:FW), exactly 32 bytes
+    QByteArray m_runIdentity; // Fixed from the first read-only boundary snapshot.
     QSet<quint32> m_zeroSequences;
     QSet<quint32> m_highSequences;
     quint32 m_lastSequence = 0;
