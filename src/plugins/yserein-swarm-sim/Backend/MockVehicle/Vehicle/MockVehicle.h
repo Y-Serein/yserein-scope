@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QElapsedTimer>
 #include <QMap>
+#include <QStringList>
 
 #include "VehicleStruct.h"
 #include "BatteryStruct.h"
@@ -73,9 +74,6 @@ private:
 	void _500HzTaskAdd();
 	void _500HzTaskDelete();
 
-	/// init work ---------------------------------------------------------
-	void _loadParams();
-
 	/// send msg ----------------------------------------------------------
 	void _sendHeartBeat();
 	void _sendBatteryStatus();
@@ -91,7 +89,7 @@ private:
 	void _handleHeartBeat(const mavlink_message_t &msg);
 	void _handleCommandLong(const mavlink_message_t &msg);
 	void _handleParamRequestList(const mavlink_message_t &msg);
-	void _handleTakeoff(const mavlink_command_long_t &request);
+	bool _handleTakeoff(const mavlink_command_long_t &request);
 	void _handleRequestDataStream(const mavlink_message_t &msg);
 	void _handleFTP(const mavlink_message_t &msg);
 	void _handleData16(const mavlink_message_t &msg);
@@ -109,7 +107,7 @@ private:
 
 private:
 
-	VehicleStruct _struct;
+	VehicleStruct _struct{};
 	MockVehicleFTP *const _mockVehicleFTP = nullptr;
 
 	const FailureMode_t _failureMode = FailNone;
@@ -125,8 +123,10 @@ private:
 	quint8 _showStage = 0;
 	qint64 _showTakeoffStartedAtMs = -1;
 
-	QMap<int, QMap<QString, QVariant>> _mapParamName2Value;
-	QMap<int, QMap<QString, MAV_PARAM_TYPE>> _mapParamName2MavParamType;
+	const QMap<int, QMap<QString, QVariant>>& _mapParamName2Value;
+	const QMap<int, QMap<QString, MAV_PARAM_TYPE>>& _mapParamName2MavParamType;
+	const QList<int>& _parameterComponentIds;
+	const QMap<int, QStringList>& _parameterNames;
 	QByteArray _messagePackage;
 	QElapsedTimer _runningTime;
 	MockVehicleWorker* _parent;

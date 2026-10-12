@@ -15,8 +15,15 @@ Rectangle {
     color: Theme.colors.baseBackground
 
     property var playerController: Frontend.droneShowPlayerController
-    property bool canPlay: playerController.canPlay
-    property int playbackState: playerController.playbackState
+    property var mockController: Frontend.mockVehicleController
+    property bool useBoxDance: mockController.danceViewActive
+    property bool canPlay: useBoxDance ? mockController.danceCanPlay : playerController.canPlay
+    property int playbackState: useBoxDance ? mockController.dancePlaybackState
+                                           : playerController.playbackState
+    property int playbackPosition: useBoxDance ? mockController.dancePosition
+                                              : playerController.position
+    property int playbackDuration: useBoxDance ? mockController.danceDuration
+                                              : playerController.duration
 
     Rectangle {
         anchors.left: parent.left
@@ -41,12 +48,27 @@ Rectangle {
         }
 
         Label {
-            text: !root.canPlay ? qsTr("等待舞步")
+            visible: root.width >= 720
+            text: !root.canPlay ? qsTr("等待舞步或模拟机")
                                 : (root.playbackState === 1 ? qsTr("正在播放")
                                                             : (root.playbackState === 2 ? qsTr("已暂停") : qsTr("已就绪")))
             color: Theme.colors.regularText
             font.pixelSize: 12
             font.weight: Font.Medium
+        }
+
+        ComboBox {
+            id: sourceCombo
+            enabled: true
+            implicitWidth: 92
+            implicitHeight: 30
+            model: [qsTr("箱式舞步"), qsTr("导入舞步")]
+            currentIndex: root.mockController.danceViewActive ? 0 : 1
+            onActivated: {
+                if (root.mockController.dancePlaybackState === 1) root.mockController.pauseDance()
+                if (root.playerController.playbackState === 1) root.playerController.pause()
+                root.mockController.setDanceViewActive(index === 0)
+            }
         }
 
         ToolButton {
@@ -55,10 +77,16 @@ Rectangle {
             implicitWidth: 32
             implicitHeight: 32
             onClicked: {
-                if (root.playbackState === 1)
+                if (root.useBoxDance) {
+                    if (root.playbackState === 1)
+                        root.mockController.pauseDance()
+                    else
+                        root.mockController.playDance()
+                } else if (root.playbackState === 1) {
                     root.playerController.pause()
-                else
+                } else {
                     root.playerController.play()
+                }
             }
 
             contentItem: Image {
@@ -79,21 +107,37 @@ Rectangle {
             }
         }
 
+        Button {
+            visible: root.useBoxDance && root.width >= 600
+            enabled: root.useBoxDance && root.playbackPosition > 0
+            text: qsTr("停止")
+            implicitHeight: 30
+            onClicked: root.mockController.stopDance()
+        }
+
         ZSlider {
             enabled: root.canPlay
             Layout.fillWidth: true
             Layout.alignment: Qt.AlignVCenter
             from: 0
-            to: root.playerController.duration
-            value: root.playerController.position
-            onMoved: root.playerController.position = value
+            to: root.playbackDuration
+            value: root.playbackPosition
+            onMoved: {
+                if (root.useBoxDance) {
+                    root.mockController.pauseDance()
+                    root.mockController.dancePosition = value
+                } else {
+                    root.playerController.position = value
+                }
+            }
         }
 
         Label {
+            visible: root.width >= 480
             Layout.preferredWidth: 126
             horizontalAlignment: Text.AlignRight
-            text: root.formatTime(root.playerController.position) + " / "
-                  + root.formatTime(root.playerController.duration)
+            text: root.formatTime(root.playbackPosition) + " / "
+                  + root.formatTime(root.playbackDuration)
             color: Theme.colors.primaryText
             font.pixelSize: 12
             font.family: "Consolas"
@@ -101,6 +145,7 @@ Rectangle {
 
         ComboBox {
             id: playbackRate
+            visible: root.width >= 640
             enabled: root.canPlay
             implicitWidth: 72
             implicitHeight: 30
@@ -113,16 +158,21 @@ Rectangle {
                 ListElement { key: "5×"; value: 5.0 }
                 ListElement { key: "10×"; value: 10.0 }
             }
-            onCurrentValueChanged: root.playerController.playbackRate = currentValue
+            onCurrentValueChanged: {
+                root.playerController.playbackRate = currentValue
+                root.mockController.dancePlaybackRate = currentValue
+            }
         }
 
         Rectangle {
+            visible: root.width >= 800
             Layout.preferredWidth: 1
             Layout.preferredHeight: 22
             color: Theme.colors.lightBorder
         }
 
         Label {
+            visible: root.width >= 800
             text: qsTr("对象 %1").arg(Frontend.mockVehicleController.count)
             color: Theme.colors.secondaryText
             font.pixelSize: 12

@@ -41,6 +41,11 @@ void MavlinkDistributor::clear()
 {
     _vehicleWorkerMap.clear();
     _vehicleWorkerSet.clear();
+    QByteArray data;
+    while (_msgQueue.try_dequeue(data)) {}
+    m_standardDecoder.reset();
+    mavlink_reset_channel_status(ZSM_MAVLINK_COMM);
+    m_status = {};
 }
 
 void MavlinkDistributor::enqueueMsg(QByteArray &data)
@@ -92,20 +97,22 @@ void MavlinkDistributor::_transmitToVehicleWorker(const mavlink_message_t &msg)
 {
     if ( msg.msgid ) zDebug(MavlinkDistributorLog) << "get Msg:" << msg.msgid;
 
-    uint16_t target_system = -1;
-    uint16_t target_component = -1;
+    uint16_t target_system = 0;
+    uint16_t target_component = 0;
     _getTarget(msg,target_system,target_component);
 
-    bool broadcast_system = (target_system == 0 || target_system == -1);
-    bool broadcast_component = (target_component == 0 || target_component == -1);
+    const bool broadcast_system = target_system == 0;
 
-    // 找到了指定的飞机，给指定的 worker 中的 vehicle
-    if ( target_system > 0 && _vehicleWorkerMap.contains(target_system) ) {
-        _vehicleWorkerMap[target_system]->messageReceived(msg,target_system);
-        return ;
+    // A command addressed to an unknown vehicle must not reach every vehicle.
+    if (!broadcast_system) {
+        auto it = _vehicleWorkerMap.find(target_system);
+        if (it != _vehicleWorkerMap.end()) {
+            it->second->messageReceived(msg, target_system);
+        }
+        return;
     }
 
-    // 给所有的 worker 让他给所有的飞机
+    // Only protocol broadcasts are forwarded to every worker.
     for (const auto& worker : _vehicleWorkerSet) {
         worker->messageReceived(msg);
     }

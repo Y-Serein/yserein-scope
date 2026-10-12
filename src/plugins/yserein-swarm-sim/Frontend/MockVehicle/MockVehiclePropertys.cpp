@@ -41,6 +41,8 @@ void MockVehiclePropertys::updateFromStrut(const VehicleStruct &other)
 
 void MockVehiclePropertys::postTaskToMockVehicleThread(std::function<void(MockVehicle*)> task)
 {
+    const auto controller = MockVehicleController::instance();
+    if (controller->clearing() || controller->getVehiclePropertys(vehicleId()) != this) return;
     const int te_vehicleId = _vehicleStruct.vehicleId;
 
     zsmApp()->addTask([te_vehicleId, task]() {
@@ -65,7 +67,7 @@ void MockVehiclePropertys::postTaskToMockVehicleThread(std::function<void(MockVe
 void MockVehiclePropertys::setBatteryRemaining(int batteryRemaining)
 {
     // zInfo(MockVehiclePropertysLog) << "get value:" << batteryRemaining;
-    if ( batteryRemaining > INT8_MAX || batteryRemaining < INT8_MIN  ) return ;
+    if ( batteryRemaining > 100 || batteryRemaining < -1 ) return ;
     if ( batteryRemaining == _vehicleStruct.battery.battery_remaining ) return ;
 
     postTaskToMockVehicleThread([batteryRemaining](MockVehicle* vehicle) {
@@ -84,6 +86,8 @@ void MockVehiclePropertys::setHeading(int heading)
 
 void MockVehiclePropertys::setPosition(QVector3D position)
 {
+    const auto controller = MockVehicleController::instance();
+    if (controller->clearing() || controller->getVehiclePropertys(vehicleId()) != this) return;
     DroneShowPlayerController::instance()->updateVehiclePosition(vehicleId(),position);
 
     postTaskToMockVehicleThread([position](MockVehicle* vehicle) {
@@ -127,7 +131,7 @@ void MockVehiclePropertys::checkPassFilter()
 
 bool MockVehiclePropertys::_updateBatteryRemaining(int batteryRemaining)
 {
-    if ( batteryRemaining > INT8_MAX || batteryRemaining < INT8_MIN  ) return false;
+    if ( batteryRemaining > 100 || batteryRemaining < -1 ) return false;
     if ( batteryRemaining == _vehicleStruct.battery.battery_remaining ) return false;
 
     _vehicleStruct.battery.battery_remaining =  static_cast<int8_t>(batteryRemaining);

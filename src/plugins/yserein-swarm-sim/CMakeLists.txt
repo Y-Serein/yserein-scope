@@ -123,6 +123,7 @@ set(SEREIN_YSEREIN_SWARM_SIM_SOURCES
     Frontend/Map3D/OSMTest/OSMRequest.h
     Frontend/MockVehicle/MockVehicleController.cpp
     Frontend/MockVehicle/MockVehicleController.h
+    Frontend/MockVehicle/BoxDancePlan.h
     Frontend/MockVehicle/MockVehiclePropertys.cpp
     Frontend/MockVehicle/MockVehiclePropertys.h
     Frontend/QmlController/QmlChartLineModel.cpp
@@ -133,6 +134,8 @@ set(SEREIN_YSEREIN_SWARM_SIM_SOURCES
     Frontend/QmlController/ZSMQmlGlobal.h
     Frontend/Show3D/DroneShowInstanceTable.cpp
     Frontend/Show3D/DroneShowInstanceTable.h
+    Frontend/Show3D/MockVehicleInstanceTable.cpp
+    Frontend/Show3D/MockVehicleInstanceTable.h
     Frontend/Show3D/DroneShowPlayerController.cpp
     Frontend/Show3D/DroneShowPlayerController.h
     Frontend/Show3D/DroneShowPlayerEngine.cpp

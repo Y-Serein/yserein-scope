@@ -139,7 +139,7 @@ Item {
             Label {
                 anchors.centerIn: parent
                 visible: root.controller.count === 0
-                text: qsTr("尚未载入模拟设备\n请先导入舞步文件")
+                text: qsTr("暂无模拟设备\n请生成网格编队或导入舞步")
                 horizontalAlignment: Text.AlignHCenter
                 color: Theme.colors.placeholderText
                 font.pixelSize: 13

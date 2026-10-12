@@ -19,6 +19,7 @@ public:
 	static void registerQmlTypes();
 
 	void init();
+    void clearShow();
 
 	static QString showZDSFileDir() { return _showZDSFileDir; }
 	static QString showBinarydir()  { return _showBinaryDir; }
@@ -49,7 +50,7 @@ private:
 	
 	bool _loadShow = false;
 
-	ShowSpecification* _show;
+	ShowSpecification* _show = nullptr;
 
 	/// static define 
 	static constexpr const char* _showZDSFileDir = "/temp/show/zds";

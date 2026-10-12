@@ -1,4 +1,5 @@
 #include "ZSMBackend.h"
+#include <QElapsedTimer>
 #include "ZSMLoggingCategory.h"
 #include "ZSMApplication.h"
 #include "LinkManager.h"
@@ -160,8 +161,11 @@ void ZSMBackend::_dequeueTask()
 		zWarning(ZSMBackendLog) << "There are too many tasks from the frontend, didn't consume yet: " << size;
 	}
 
+	QElapsedTimer budget;
+	budget.start();
 	std::function<void()> task;
-	while ( _taskQueue.try_dequeue(task) ) {
+	while (_taskQueue.try_dequeue(task)) {
 		task();
+		if (budget.elapsed() >= 4) break;
 	}
 }

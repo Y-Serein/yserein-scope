@@ -14,8 +14,13 @@ enum class ProtocolDomain : uint8_t {
 };
 
 /// Returns the active protocol domain. Defaults to Private16 unless configured
-/// via CLI (--protocol) or the persisted Mavlink/ProtocolDomain setting.
+/// by the persisted Mavlink/ProtocolDomain setting.
 ProtocolDomain currentProtocolDomain();
+
+/// Reads or updates the domain used on the next Scope start. Changing it does
+/// not change an already running simulator session.
+ProtocolDomain configuredProtocolDomain();
+void configureProtocolDomainForNextStart(ProtocolDomain domain);
 
 /// Sets the active protocol domain and persists it to QSettings.
 void setProtocolDomain(ProtocolDomain domain);

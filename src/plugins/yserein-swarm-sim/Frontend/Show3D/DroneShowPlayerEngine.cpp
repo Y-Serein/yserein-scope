@@ -74,7 +74,14 @@ ZSMTime::TrackDuration DroneShowPlayerEngine::duration() const
 
 void DroneShowPlayerEngine::_loadShowSpecification(ShowSpecification* show)
 {
-	if (!show) return;
+    if (!show) {
+        stop();
+        _timeController.sync(TrackPosition(0));
+        _show = nullptr;
+        _duration = 0;
+        emit durationChanged();
+        return;
+    }
 	
 	_show = show;
 	_duration = static_cast<qint64>(_show->showSettings()->cues()->items.back().time * 1000);

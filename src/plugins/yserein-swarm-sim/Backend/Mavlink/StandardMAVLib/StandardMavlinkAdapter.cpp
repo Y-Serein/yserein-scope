@@ -1,6 +1,9 @@
 #include "StandardMavlinkAdapter.h"
 
+#include "Backend/Mavlink/StandardMAVLib/generated/LayoutTable.h"
+
 #include <algorithm>
+#include <array>
 #include <cstring>
 
 namespace zds::back::mavlink8 {
@@ -10,240 +13,136 @@ namespace {
 constexpr uint16_t kStandardGcsSystemId = 255;
 constexpr uint16_t kPrivateGcsSystemId = 32767;
 
-uint16_t privateTargetSystem(uint8_t standardSystemId)
-{
-    return standardSystemId == kStandardGcsSystemId
-        ? kPrivateGcsSystemId
-        : standardSystemId;
-}
+// Sentinel for a dialect-only field that has no counterpart in the standard
+// payload. Fields flagged with this source offset are zero-filled when mapping
+// standard -> private and dropped when mapping private -> standard.
+constexpr uint16_t kNoStandardSource = 0xFFFF;
 
-void writeU16(uint8_t* data, uint16_t value)
+const MessageLayout* findLayout(uint32_t msgId)
 {
-    data[0] = static_cast<uint8_t>(value & 0xFF);
-    data[1] = static_cast<uint8_t>(value >> 8);
-}
-
-void copyRange(uint8_t* destination, size_t destinationOffset,
-               const uint8_t* source, size_t sourceOffset, size_t length)
-{
-    std::memcpy(destination + destinationOffset, source + sourceOffset, length);
-}
-
-bool translatePayloadToPrivate(uint32_t messageId,
-                               const uint8_t* source,
-                               uint8_t sourceLength,
-                               uint8_t* destination,
-                               uint16_t& destinationLength)
-{
-    if (sourceLength == 0) return false;
-    // The generated standard dialect uses the canonical MAVLink field order.
-    // The private dialect widened target_system to uint16_t, which changes
-    // wire offsets for these messages.
-    switch (messageId) {
-    case MAVLINK_MSG_ID_COMMAND_ACK:
-        if (sourceLength == 0) return false;
-        copyRange(destination, 0, source, 0, 8);
-        writeU16(destination + 8, privateTargetSystem(source[8]));
-        destination[10] = source[9];
-        destinationLength = 11;
-        return true;
-    case MAVLINK_MSG_ID_COMMAND_LONG:
-        copyRange(destination, 0, source, 0, 28);
-        writeU16(destination + 28, privateTargetSystem(source[30]));
-        copyRange(destination, 30, source, 28, 2);
-        copyRange(destination, 32, source, 31, 2);
-        destinationLength = 34;
-        return true;
-    case MAVLINK_MSG_ID_COMMAND_INT:
-        copyRange(destination, 0, source, 0, 28);
-        writeU16(destination + 28, privateTargetSystem(source[30]));
-        copyRange(destination, 30, source, 28, 2);
-        copyRange(destination, 32, source, 31, 4);
-        destinationLength = 36;
-        return true;
-    case MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL:
-        writeU16(destination, privateTargetSystem(source[1]));
-        destination[2] = source[0]; // target_network
-        destination[3] = source[2]; // target_component
-        copyRange(destination, 4, source, 3, 251);
-        destinationLength = 255;
-        return true;
-    case MAVLINK_MSG_ID_PARAM_REQUEST_LIST:
-        writeU16(destination, privateTargetSystem(source[0]));
-        destination[2] = source[1];
-        destinationLength = 3;
-        return true;
-    case MAVLINK_MSG_ID_PARAM_REQUEST_READ:
-        writeU16(destination, privateTargetSystem(source[2]));
-        copyRange(destination, 2, source, 0, 2);
-        destination[4] = source[3];
-        copyRange(destination, 5, source, 4, 16);
-        destinationLength = 21;
-        return true;
-    case MAVLINK_MSG_ID_PARAM_SET:
-        copyRange(destination, 0, source, 0, 4);
-        writeU16(destination + 4, privateTargetSystem(source[4]));
-        destination[6] = source[5];
-        copyRange(destination, 7, source, 6, 16);
-        destination[23] = source[22];
-        destinationLength = 24;
-        return true;
-    case MAVLINK_MSG_ID_REQUEST_DATA_STREAM:
-        writeU16(destination, privateTargetSystem(source[2]));
-        copyRange(destination, 2, source, 0, 2);
-        copyRange(destination, 4, source, 3, 3);
-        destinationLength = 7;
-        return true;
-    case MAVLINK_MSG_ID_LOG_REQUEST_DATA:
-        copyRange(destination, 0, source, 0, 8);
-        writeU16(destination + 8, privateTargetSystem(source[10]));
-        copyRange(destination, 10, source, 8, 2);
-        destination[12] = source[11];
-        destinationLength = 13;
-        return true;
-    case MAVLINK_MSG_ID_LOG_REQUEST_END:
-        writeU16(destination, privateTargetSystem(source[0]));
-        destination[2] = source[1];
-        destinationLength = 3;
-        return true;
-    case MAVLINK_MSG_ID_LOG_REQUEST_LIST:
-        writeU16(destination, privateTargetSystem(source[4]));
-        copyRange(destination, 2, source, 0, 4);
-        destination[6] = source[5];
-        destinationLength = 7;
-        return true;
-    case MAVLINK_MSG_ID_SET_MODE:
-        copyRange(destination, 0, source, 0, 4);
-        writeU16(destination + 4, privateTargetSystem(source[4]));
-        destination[6] = source[5];
-        destinationLength = 7;
-        return true;
-    case MAVLINK_MSG_ID_LED_CONTROL:
-        writeU16(destination, privateTargetSystem(source[0]));
-        copyRange(destination, 2, source, 1, 28);
-        destinationLength = 30;
-        return true;
-    default: {
-        // For unchanged messages, the private decoder can consume the
-        // standard payload directly. Its length table is intentionally not
-        // used here because MAVLink2 may omit trailing extension bytes.
-        const auto* entry = mavlink_get_msg_entry(messageId);
-        if (!entry) return false;
-        std::memcpy(destination, source, sourceLength);
-        destinationLength = sourceLength;
-        return true;
+    const auto* begin = kMessageLayouts;
+    const auto* end = kMessageLayouts + kMessageLayoutCount;
+    while (begin < end) {
+        const auto* mid = begin + (end - begin) / 2;
+        if (mid->msgId == msgId) {
+            return mid;
+        }
+        if (mid->msgId < msgId) {
+            begin = mid + 1;
+        } else {
+            end = mid;
+        }
     }
+    return nullptr;
+}
+
+bool hasSameLayout(uint32_t msgId)
+{
+    for (uint16_t id : kSameLayoutMsgIds) {
+        if (id == msgId) {
+            return true;
+        }
+    }
+    return false;
+}
+
+uint16_t readLittleEndian(const uint8_t* data, uint16_t size)
+{
+    uint16_t value = 0;
+    for (uint16_t i = 0; i < size && i < 2; ++i) {
+        value |= static_cast<uint16_t>(data[i]) << (8 * i);
+    }
+    return value;
+}
+
+void writeLittleEndian(uint8_t* data, uint16_t size, uint16_t value)
+{
+    for (uint16_t i = 0; i < size && i < 2; ++i) {
+        data[i] = static_cast<uint8_t>(value >> (8 * i));
     }
 }
 
-bool translatePayloadToStandard(uint32_t messageId,
-                                const uint8_t* source,
-                                uint16_t sourceLength,
-                                Packet& packet)
+// Maps a single field from a standard payload into a private payload. Dialect-only
+// fields are pre-zeroed by the caller. Returns false on out-of-bounds access.
+bool applyToPrivate(const LayoutStep& step,
+                    const uint8_t* stdPayload,
+                    uint16_t stdLen,
+                    uint8_t* privPayload,
+                    uint16_t privCap)
 {
-    if (sourceLength == 0) return false;
-    std::fill(packet.payload.begin(), packet.payload.end(), 0);
-    switch (messageId) {
-    case MAVLINK_MSG_ID_COMMAND_ACK:
-        copyRange(packet.payload.data(), 0, source, 0, 8);
-        packet.payload[8] = source[8];
-        packet.payload[9] = source[10];
-        packet.payloadLength = 10;
-        return true;
-    case MAVLINK_MSG_ID_COMMAND_LONG:
-        copyRange(packet.payload.data(), 0, source, 0, 28);
-        copyRange(packet.payload.data(), 28, source, 30, 2);
-        packet.payload[30] = source[28];
-        packet.payload[31] = source[32];
-        packet.payload[32] = source[33];
-        packet.payloadLength = 33;
-        return true;
-    case MAVLINK_MSG_ID_COMMAND_INT:
-        copyRange(packet.payload.data(), 0, source, 0, 28);
-        copyRange(packet.payload.data(), 28, source, 30, 2);
-        packet.payload[30] = source[28];
-        packet.payload[31] = source[32];
-        copyRange(packet.payload.data(), 32, source, 33, 3);
-        packet.payloadLength = 35;
-        return true;
-    case MAVLINK_MSG_ID_FILE_TRANSFER_PROTOCOL:
-        packet.payload[0] = source[2];
-        packet.payload[1] = source[0];
-        packet.payload[2] = source[3];
-        copyRange(packet.payload.data(), 3, source, 4, 251);
-        packet.payloadLength = 254;
-        return true;
-    case MAVLINK_MSG_ID_PARAM_REQUEST_LIST:
-        packet.payload[0] = source[0];
-        packet.payload[1] = source[2];
-        packet.payloadLength = 2;
-        return true;
-    case MAVLINK_MSG_ID_PARAM_REQUEST_READ:
-        copyRange(packet.payload.data(), 0, source, 2, 2);
-        packet.payload[2] = source[0];
-        packet.payload[3] = source[4];
-        copyRange(packet.payload.data(), 4, source, 5, 16);
-        packet.payloadLength = 20;
-        return true;
-    case MAVLINK_MSG_ID_PARAM_SET:
-        copyRange(packet.payload.data(), 0, source, 0, 4);
-        packet.payload[4] = source[4];
-        packet.payload[5] = source[6];
-        copyRange(packet.payload.data(), 6, source, 7, 16);
-        packet.payload[22] = source[23];
-        packet.payloadLength = 23;
-        return true;
-    case MAVLINK_MSG_ID_REQUEST_DATA_STREAM:
-        copyRange(packet.payload.data(), 0, source, 2, 2);
-        packet.payload[2] = source[0];
-        packet.payload[3] = source[4];
-        copyRange(packet.payload.data(), 4, source, 5, 2);
-        packet.payloadLength = 6;
-        return true;
-    case MAVLINK_MSG_ID_LOG_REQUEST_DATA:
-        copyRange(packet.payload.data(), 0, source, 0, 8);
-        copyRange(packet.payload.data(), 8, source, 10, 2);
-        packet.payload[10] = source[8];
-        packet.payload[11] = source[12];
-        packet.payloadLength = 12;
-        return true;
-    case MAVLINK_MSG_ID_LOG_REQUEST_END:
-        packet.payload[0] = source[0];
-        packet.payload[1] = source[2];
-        packet.payloadLength = 2;
-        return true;
-    case MAVLINK_MSG_ID_LOG_REQUEST_LIST:
-        copyRange(packet.payload.data(), 0, source, 2, 4);
-        packet.payload[4] = source[0];
-        packet.payload[5] = source[6];
-        packet.payloadLength = 6;
-        return true;
-    case MAVLINK_MSG_ID_SET_MODE:
-        copyRange(packet.payload.data(), 0, source, 0, 4);
-        packet.payload[4] = source[4];
-        packet.payload[5] = source[6];
-        packet.payloadLength = 6;
-        return true;
-    case MAVLINK_MSG_ID_LED_CONTROL:
-        packet.payload[0] = source[0];
-        copyRange(packet.payload.data(), 1, source, 2, 28);
-        packet.payloadLength = 29;
-        return true;
-    default: {
-        const auto* entry = mavlink_get_msg_entry(messageId);
-        if (!entry || sourceLength > entry->max_msg_len || sourceLength > 255) return false;
-        std::memcpy(packet.payload.data(), source, sourceLength);
-        packet.payloadLength = static_cast<uint8_t>(sourceLength);
+    if (step.stdOffset == kNoStandardSource) {
         return true;
     }
+    if (step.stdOffset > stdLen || step.stdSize > stdLen - step.stdOffset) {
+        return false;
     }
+    if (step.privOffset > privCap || step.privSize > privCap - step.privOffset) {
+        return false;
+    }
+
+    if (step.stdSize == step.privSize) {
+        std::memcpy(privPayload + step.privOffset, stdPayload + step.stdOffset, step.stdSize);
+        return true;
+    }
+    if (step.stdSize != 1 || step.privSize != 2) return false;
+    uint16_t value = readLittleEndian(stdPayload + step.stdOffset, step.stdSize);
+    if (step.isTargetSystem) {
+        if (value == kStandardGcsSystemId) {
+            value = kPrivateGcsSystemId;
+        } else if (value > kStandardGcsSystemId) {
+            // Not representable in the standard domain.
+            return false;
+        }
+    }
+    writeLittleEndian(privPayload + step.privOffset, step.privSize, value);
+    return true;
+}
+
+// Inverse of applyToPrivate: maps a single field from a private payload back into
+// a standard payload. Dialect-only fields are dropped. Returns false on
+// out-of-bounds access.
+bool applyToStandard(const LayoutStep& step,
+                     const uint8_t* privPayload,
+                     uint16_t privLen,
+                     uint8_t* stdPayload,
+                     uint16_t stdCap)
+{
+    if (step.stdOffset == kNoStandardSource) {
+        return true;
+    }
+    if (step.privOffset > privLen || step.privSize > privLen - step.privOffset) {
+        return false;
+    }
+    if (step.stdOffset > stdCap || step.stdSize > stdCap - step.stdOffset) {
+        return false;
+    }
+
+    if (step.stdSize == step.privSize) {
+        std::memcpy(stdPayload + step.stdOffset, privPayload + step.privOffset, step.stdSize);
+        return true;
+    }
+    if (step.stdSize != 1 || step.privSize != 2) return false;
+    uint16_t value = readLittleEndian(privPayload + step.privOffset, step.privSize);
+    if (step.isTargetSystem) {
+        if (value == kPrivateGcsSystemId) {
+            value = kStandardGcsSystemId;
+        } else if (value > kStandardGcsSystemId) {
+            // A private id above 255 has no 8-bit standard representation.
+            return false;
+        }
+    }
+    if (value > 255) return false;
+    writeLittleEndian(stdPayload + step.stdOffset, step.stdSize, value);
+    return true;
 }
 
 } // namespace
 
 bool decodeToPrivate(const Packet& packet, ::mavlink_message_t& message)
 {
-    if (packet.systemId == 0) return false;
+    if (packet.systemId == 0) {
+        return false;
+    }
 
     message = ::mavlink_message_t{};
     message.magic = packet.version == WireVersion::Mavlink1
@@ -252,18 +151,47 @@ bool decodeToPrivate(const Packet& packet, ::mavlink_message_t& message)
     message.incompat_flags = packet.incompatFlags;
     message.compat_flags = packet.compatFlags;
     message.seq = packet.sequence;
-    message.sysid = packet.systemId;
+    // Symmetric with encodeFromPrivate: the standard GCS id maps to the private
+    // reserved id when crossing back into the private domain.
+    message.sysid = packet.systemId == kStandardGcsSystemId
+        ? kPrivateGcsSystemId
+        : packet.systemId;
     message.compid = packet.componentId;
     message.msgid = packet.messageId;
+
+    uint8_t* privPayload = reinterpret_cast<uint8_t*>(&message.payload64[0]);
+    const uint16_t privCap = static_cast<uint16_t>(sizeof(message.payload64));
     uint16_t privateLength = 0;
-    if (!translatePayloadToPrivate(
-            packet.messageId,
-            packet.payload.data(),
-            packet.payloadLength,
-            reinterpret_cast<uint8_t*>(&message.payload64[0]),
-            privateLength)) {
+
+    if (const auto* layout = findLayout(packet.messageId)) {
+        if (packet.payloadLength > layout->stdLen) return false;
+        // MAVLink2 may trim any trailing zero bytes. The packet payload is
+        // zero-initialized by the parser, so map the complete logical layout.
+        // Clear the whole private payload so dialect-only fields end up zeroed.
+        std::fill(privPayload, privPayload + privCap, 0);
+        for (uint16_t i = 0; i < layout->fieldCount; ++i) {
+            if (!applyToPrivate(layout->steps[i],
+                                packet.payload.data(),
+                                layout->stdLen,
+                                privPayload,
+                                privCap)) {
+                return false;
+            }
+        }
+        privateLength = layout->privLen;
+    } else if (hasSameLayout(packet.messageId)) {
+        // Struct layouts are identical; copy the payload verbatim.
+        if (packet.payloadLength > privCap) {
+            return false;
+        }
+        std::memcpy(privPayload, packet.payload.data(), packet.payloadLength);
+        privateLength = packet.payloadLength;
+    } else {
+        // Neither a known layout delta nor a confirmed identical layout. Reject
+        // rather than shipping a payload that may be silently corrupted.
         return false;
     }
+
     message.len = privateLength;
     return true;
 }
@@ -272,8 +200,12 @@ bool encodeFromPrivate(const ::mavlink_message_t& message,
                        mavlink::StandardWireVersion version,
                        std::vector<uint8_t>& bytes)
 {
-    if (message.sysid > 255 || message.sysid == 0) {
-        if (message.sysid != 32767) return false;
+    // The private dialect reserves 32767 for the GCS. Any other id must fit the
+    // standard 8-bit domain to be representable on the wire.
+    const uint16_t systemId = message.sysid;
+    if (systemId != kPrivateGcsSystemId
+        && (systemId == 0 || systemId > kStandardGcsSystemId)) {
+        return false;
     }
 
     Packet packet{};
@@ -281,18 +213,41 @@ bool encodeFromPrivate(const ::mavlink_message_t& message,
         ? WireVersion::Mavlink1
         : WireVersion::Mavlink2;
     packet.sequence = message.seq;
-    packet.systemId = message.sysid == 32767
+    packet.systemId = systemId == kPrivateGcsSystemId
         ? kStandardGcsSystemId
-        : static_cast<uint8_t>(message.sysid);
+        : static_cast<uint8_t>(systemId);
     packet.componentId = message.compid;
     packet.messageId = message.msgid;
-    if (!translatePayloadToStandard(
-            message.msgid,
-            reinterpret_cast<const uint8_t*>(&message.payload64[0]),
-            message.len,
-            packet)) {
+
+    const uint8_t* privPayload = reinterpret_cast<const uint8_t*>(&message.payload64[0]);
+    const uint16_t privLen = static_cast<uint16_t>(message.len);
+    const uint16_t stdCap = static_cast<uint16_t>(packet.payload.size());
+
+    if (const auto* layout = findLayout(message.msgid)) {
+        if (privLen > layout->privLen) return false;
+        std::array<uint8_t, sizeof(message.payload64)> padded{};
+        std::memcpy(padded.data(), privPayload, privLen);
+        std::fill(packet.payload.begin(), packet.payload.end(), 0);
+        for (uint16_t i = 0; i < layout->fieldCount; ++i) {
+            if (!applyToStandard(layout->steps[i],
+                                 padded.data(),
+                                 layout->privLen,
+                                 packet.payload.data(),
+                                 stdCap)) {
+                return false;
+            }
+        }
+        packet.payloadLength = layout->stdLen;
+    } else if (hasSameLayout(message.msgid)) {
+        if (privLen > stdCap) {
+            return false;
+        }
+        std::memcpy(packet.payload.data(), privPayload, privLen);
+        packet.payloadLength = static_cast<uint8_t>(privLen);
+    } else {
         return false;
     }
+
     return encode(packet, packet.version, bytes);
 }
 

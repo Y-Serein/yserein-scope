@@ -7,6 +7,8 @@
 #include <QObject>
 #include <QTimer>
 #include <functional>
+#include <atomic>
+#include <memory>
 #include <vector>
 #include <QByteArray>
 #include <qloggingcategory.h>
@@ -64,6 +66,7 @@ public:
     /// task ----------------------------------------------------
 
     void addTask(std::function<void()> task);
+    void clearVehiclesTask();
 
     /// only allow called by MockVehiclePool
     /// @return true : success ; false : encountered MAX_VEHICLE_NUM
@@ -83,12 +86,14 @@ public:
     ///TODO 在大批量更新的时候会不断加锁可以优化
     /// receive task from pool
     void addUpdateVehiclePositionTask(const Pair_IdVector3D_t& pair_);
+    void addUpdateVehiclePositionsTask(std::vector<Pair_IdVector3D_t> positions);
 
     /// send message buffer -------------------------------------
 
     void addMessageToBuffer(const QByteArray& bytes);
 
 signals:
+    void vehiclesCleared();
     void _10HzSignal();
     void _1HzSignal();
     void _500HzSignal();
@@ -129,6 +134,8 @@ private:
     moodycamel::ConcurrentQueue<std::function<void()>> _taskQueue;
     moodycamel::ReaderWriterQueue<MavlinkMessage_t> _msgRecvQueue;
     QByteArray _bytesBuffer;
+    std::shared_ptr<std::atomic_uint64_t> _snapshotGeneration = std::make_shared<std::atomic_uint64_t>(0);
+    std::shared_ptr<std::atomic_bool> _snapshotPending = std::make_shared<std::atomic_bool>(false);
 
     static constexpr int MAX_VEHICLE_NUM = 1010;        ///TODO Settings
 };

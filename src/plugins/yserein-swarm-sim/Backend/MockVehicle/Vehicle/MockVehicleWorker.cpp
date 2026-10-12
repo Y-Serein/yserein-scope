@@ -7,6 +7,8 @@
 #include "MockVehicleController.h"
 
 #include <windows.h>
+#include <QElapsedTimer>
+#include <utility>
 
 
 ZSM_LOGGING_CATEGORY(MockVehicleWorkerLog, "Backend.MockVehicle.MockVehicleWorker")
@@ -100,6 +102,23 @@ void MockVehicleWorker::addTask(std::function<void()> task)
     _taskQueue.enqueue(task);
 }
 
+void MockVehicleWorker::clearVehiclesTask()
+{
+    // Enqueued by the backend after previous create/update tasks from that producer.
+    addTask([this]() {
+        _snapshotGeneration->fetch_add(1);
+        MavlinkMessage_t message;
+        while (_msgRecvQueue.try_dequeue(message)) {}
+        {
+            std::lock_guard<std::mutex> guard(_vehiclesMutex);
+            for (const auto& [id, vehicle] : _vehicles) delete vehicle;
+            _vehicles.clear();
+        }
+        _bytesBuffer.clear();
+        emit vehiclesCleared();
+    });
+}
+
 bool MockVehicleWorker::addVehicleTask(uint16_t vehicleId)
 {
     return _addVehicleTask(vehicleId, std::nullopt);
@@ -148,23 +167,27 @@ void MockVehicleWorker::messageReceived(const mavlink_message_t &message)
 
 void MockVehicleWorker::addUpdateVehiclePositionTask(const Pair_IdVector3D_t &pair_)
 {
-    MockVehicle* vehicle = nullptr;
+    // Resolve by ID in the worker; a queued raw pointer could outlive a clear.
+    _taskQueue.enqueue([this, pair_]() {
+        const auto it = _vehicles.find(pair_.first);
+        if (it != _vehicles.end()) it->second->updatePosition(pair_.second);
+    });
+}
 
-    {   // 避免死锁，限制作用域
-        std::lock_guard<std::mutex> _guard(_vehiclesMutex);
-        const auto& it =_vehicles.find(pair_.first);
-        if ( it == _vehicles.end() ) {
-            zCritical(MockVehicleWorkerLog) << "vehicle does not exist in this worker";
-            return ;
+void MockVehicleWorker::addUpdateVehiclePositionsTask(std::vector<Pair_IdVector3D_t> positions)
+{
+    _taskQueue.enqueue([this, positions = std::move(positions)]() {
+        int missing = 0;
+        // All map mutations and this task execute in this worker's event loop.
+        for (const auto& [id, position] : positions) {
+            const auto it = _vehicles.find(static_cast<uint16_t>(id));
+            if (it == _vehicles.end()) {
+                ++missing;
+                continue;
+            }
+            it->second->updatePosition(position);
         }
-
-        vehicle = it->second;
-    }
-
-    if (!vehicle) return ;
-
-    _taskQueue.enqueue([this, vehicle, pair_]() {
-        vehicle->updatePosition(pair_.second);
+        if (missing) zWarning(MockVehicleWorkerLog) << "position update missing vehicles:" << missing;
     });
 }
 
@@ -243,9 +266,12 @@ void MockVehicleWorker::_500HzLoop()
 
 void MockVehicleWorker::_handleQueueTask()
 {
+    QElapsedTimer budget;
+    budget.start();
     std::function<void()> task;
-    while ( _taskQueue.try_dequeue(task) && _isRunning) {
+    while (_isRunning && _taskQueue.try_dequeue(task)) {
         task();
+        if (budget.elapsed() >= 4) break;
     }
 }
 
@@ -288,6 +314,9 @@ void MockVehicleWorker::_handleMessageReceived()
 
 void MockVehicleWorker::_pushVehicleToFrontendTask()
 {
+    // Keep at most one pending full snapshot per worker if the UI is busy.
+    const auto pending = _snapshotPending;
+    if (pending->exchange(true)) return;
     std::vector<MockVehicle*> te_vehicles = getAllVehicles();
     std::vector<VehicleStruct> list;
     list.reserve(te_vehicles.size());
@@ -297,8 +326,12 @@ void MockVehicleWorker::_pushVehicleToFrontendTask()
     }
 
     //! 用 std::move 避免 list 拷贝
-    guiApp()->addTask([list_ = std::move(list)]() {
-        MockVehicleController::instance()->updataVehicleSnapshot(list_);
+    const auto generation = _snapshotGeneration;
+    const auto revision = generation->load();
+    guiApp()->addTask([list_ = std::move(list), pending, generation, revision]() {
+        if (generation->load() == revision)
+            MockVehicleController::instance()->updataVehicleSnapshot(list_);
+        pending->store(false);
     });
 }
 

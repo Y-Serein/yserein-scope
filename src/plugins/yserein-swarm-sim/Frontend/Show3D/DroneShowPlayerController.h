@@ -70,6 +70,7 @@ public:
 
 	void updateTakeoffVehicle(int vehicleId, double altitudeRelative);
 	void requestStartFromGroundStation();
+    void discardVehicleTasks();
 
 signals:
 	void playbackStateChanged(PlaybackState state);

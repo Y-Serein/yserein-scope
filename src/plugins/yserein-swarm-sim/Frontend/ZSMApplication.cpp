@@ -10,6 +10,7 @@
 #include <QtQuick/QQuickView>
 #include <QtCore/QCoreApplication>
 #include <QtCore/QEventLoop>
+#include <QtCore/QElapsedTimer>
 #include <QtCore/QFile>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QTextStream>
@@ -201,9 +202,12 @@ void ZSMApplication::_dequeueTask()
 		zWarning(ZSMApplicationLog) << "There are too many tasks from the backend, didn't consume yet: " << size;
 	}
 
+	QElapsedTimer budget;
+	budget.start();
 	std::function<void()> task;
 	while (_taskQueue.try_dequeue(task)) {
 		task();
+		if (budget.elapsed() >= 4) break;
 	}
 }
 

@@ -14,14 +14,22 @@ static ProtocolDomain domainFromInt(int v) {
     return v == 1 ? ProtocolDomain::Standard8 : ProtocolDomain::Private16;
 }
 
+ProtocolDomain configuredProtocolDomain() {
+    QSettings settings;
+    ProtocolDomain domain = ProtocolDomain::Private16;
+    parseProtocolDomain(settings.value(QStringLiteral("Mavlink/ProtocolDomain")).toString(), domain);
+    return domain;
+}
+
+void configureProtocolDomainForNextStart(ProtocolDomain domain) {
+    QSettings settings;
+    settings.setValue(QStringLiteral("Mavlink/ProtocolDomain"),
+                      domain == ProtocolDomain::Standard8 ? QStringLiteral("standard8") : QStringLiteral("private16"));
+}
+
 ProtocolDomain currentProtocolDomain() {
     if (!g_domainSet.load(std::memory_order_acquire)) {
-        // Not explicitly selected on this run: honor the persisted setting.
-        QSettings settings;
-        ProtocolDomain d;
-        if (parseProtocolDomain(settings.value(QStringLiteral("Mavlink/ProtocolDomain")).toString(), d)) {
-            g_domain.store(static_cast<int>(d), std::memory_order_release);
-        }
+        g_domain.store(static_cast<int>(configuredProtocolDomain()), std::memory_order_release);
         g_domainSet.store(true, std::memory_order_release);
     }
     return domainFromInt(g_domain.load(std::memory_order_acquire));
@@ -30,9 +38,7 @@ ProtocolDomain currentProtocolDomain() {
 void setProtocolDomain(ProtocolDomain domain) {
     g_domain.store(static_cast<int>(domain), std::memory_order_release);
     g_domainSet.store(true, std::memory_order_release);
-    QSettings settings;
-    settings.setValue(QStringLiteral("Mavlink/ProtocolDomain"),
-                      domain == ProtocolDomain::Standard8 ? QStringLiteral("standard8") : QStringLiteral("private16"));
+    configureProtocolDomainForNextStart(domain);
 }
 
 bool parseProtocolDomain(const QString& value, ProtocolDomain& out) {

@@ -5,7 +5,9 @@
 #include "ShowSpecification.h"
 #include "SphereModelController.h"
 #include "DroneShowInstanceTable.h"
+#include "MockVehicleInstanceTable.h"
 #include "MockVehicleManager.h"
+#include "MockVehicleController.h"
 
 #include "ZSMApplication.h"
 #include "ZSMBackend.h"
@@ -48,6 +50,7 @@ void DroneShowPlayerController::registerQmlTypes()
 {
     qmlRegisterUncreatableType<DroneShowPlayerController>("Frontend.Show3D", 1, 0, "DroneShowPlayerController", "Reference only");
     qmlRegisterType<DroneShowInstanceTable>("Frontend.Show3D", 1, 0, "DroneShowInstanceTable");
+    qmlRegisterType<MockVehicleInstanceTable>("Frontend.Show3D", 1, 0, "MockVehicleInstanceTable");
 }
 
 void DroneShowPlayerController::init()
@@ -96,7 +99,7 @@ void DroneShowPlayerController::setPosition(qint64 pos)
 void DroneShowPlayerController::play()
 {
     // TODO 判断是否 Load
-    if( !_canPlay ) return ;
+    if (!_canPlay || MockVehicleController::instance()->clearing()) return;
 
 
     if (_playbackState == StoppedState) {
@@ -165,6 +168,8 @@ void DroneShowPlayerController::requestStartFromGroundStation()
     _taskQueue.enqueue([this]() {
         _groundStationStartQueued.store(false);
         if (!_canPlay) return;
+        const auto mock = MockVehicleController::instance();
+        if (mock->danceViewActive() && mock->danceCanPlay()) return;
 
         // A scheduled start always begins from the start of the loaded show,
         // independent of any earlier manual preview state.
@@ -173,17 +178,41 @@ void DroneShowPlayerController::requestStartFromGroundStation()
     });
 }
 
+void DroneShowPlayerController::discardVehicleTasks()
+{
+    // GUI thread, after all vehicle workers have acknowledged the clear barrier.
+    std::function<void()> task;
+    while (_taskQueue.try_dequeue(task)) {}
+    _groundStationStartQueued.store(false);
+}
+
 void DroneShowPlayerController::_loadShow(bool isLoad)
 {
+    if (!isLoad) {
+        _positionUpdateTimer.stop();
+        _canPlay = false;
+        _playbackState = StoppedState;
+        _isPlaying = false;
+        _playbackEngine->_loadShowSpecification(nullptr);
+        _drones->clearAndDeleteContents();
+        emit dronesChanged();
+        emit canPlayChanged(false);
+        emit playbackStateChanged(_playbackState);
+        emit playingChanged();
+        emit positionChanged(0);
+        return;
+    }
     if (isLoad) {
-        _canPlay = true;
-        _playbackEngine->_loadShowSpecification(DroneShowController::instance()->showSpecification());
-
-        // 生成无人机
         const auto controller = DroneShowController::instance();
         const auto show = controller->showSpecification();
         if (!show) return;
 
+        if (_canPlay) stop();
+        _drones->clearAndDeleteContents();
+        _playbackEngine->_loadShowSpecification(show);
+        _canPlay = true;
+
+        // 生成无人机
         for (auto drone : *(show->drones())) {
             auto model = new SphereModelController(drone->settings()->name,drone,this);
             _drones->append(model);
@@ -198,7 +227,8 @@ void DroneShowPlayerController::_loadShow(bool isLoad)
 
 void DroneShowPlayerController::_1HzLoop()
 {
-    if ( _drones->count() > 0 ) {
+    const auto mock = MockVehicleController::instance();
+    if ( _drones->count() > 0 && !(mock->danceViewActive() && mock->danceCanPlay()) ) {
         _pushVehiclePosition();
     }
 }
@@ -210,6 +240,7 @@ void DroneShowPlayerController::_500HzLoop()
 
 void DroneShowPlayerController::_updatePosition()
 {
+    if (!_canPlay) return;
     //TEst 
     qint64 pos = _canPlay ? _playbackEngine->currentPosition().get() : 0;
     //zDebug(DroneShowPlayerControllerLog) << "pos:" << pos;

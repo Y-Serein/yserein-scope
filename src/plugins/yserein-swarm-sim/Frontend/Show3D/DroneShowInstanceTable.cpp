@@ -19,7 +19,14 @@ DroneShowInstanceTable::~DroneShowInstanceTable()
 
 void DroneShowInstanceTable::setDrones(QmlObjectListModel* drones)
 {
+    if (_drones) disconnect(_drones, nullptr, this, nullptr);
 	_drones = drones;
+    if (_drones) {
+        connect(_drones, &QmlObjectListModel::countChanged, this, [this]() {
+            _dirty = true;
+            markDirty();
+        });
+    }
 	emit dronesChanged();
 	markDirty();
 	_dirty = true;

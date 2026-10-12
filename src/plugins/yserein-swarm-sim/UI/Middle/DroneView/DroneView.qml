@@ -27,7 +27,8 @@ Rectangle {
             anchors.top: parent.top
             anchors.leftMargin: 14
             anchors.topMargin: 12
-            text: qsTr("3D 舞步预览")
+            text: view3D.showImported
+                  ? qsTr("3D 舞步预览") : qsTr("3D 模拟机编队")
             color: Theme.colors.primaryText
             font.pixelSize: 13
             font.weight: Font.DemiBold
@@ -35,16 +36,30 @@ Rectangle {
         }
 
         Label {
+            id: aircraftCount
             anchors.right: parent.right
             anchors.top: parent.top
             anchors.rightMargin: 14
             anchors.topMargin: 13
-            text: Frontend.mockVehicleController.count > 0
-                  ? qsTr("%1 个实例").arg(Frontend.mockVehicleController.count)
-                  : qsTr("尚未载入")
+            text: view3D.showImported
+                  ? qsTr("%1 个舞步对象").arg(Frontend.droneShowPlayerController.drones.count)
+                  : (Frontend.mockVehicleController.count > 0
+                     ? qsTr("%1 台模拟机").arg(Frontend.mockVehicleController.count)
+                     : qsTr("尚未载入"))
             color: Theme.colors.secondaryText
             font.pixelSize: 12
             z: 2
+        }
+
+        Button {
+            anchors.right: aircraftCount.left
+            anchors.rightMargin: 12
+            anchors.top: parent.top
+            anchors.topMargin: 5
+            text: qsTr("重置视角")
+            implicitHeight: 30
+            z: 2
+            onClicked: view3D.resetCamera()
         }
 
         Rectangle {
@@ -58,6 +73,7 @@ Rectangle {
         }
 
         World3DViewInstance {
+            id: view3D
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top

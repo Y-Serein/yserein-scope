@@ -12,9 +12,11 @@
 #include "ZSMBackend.h"
 
 #include "MockVehicleManager.h"
+#include "MockVehicleController.h"
 
 #include <QtCore/qapplicationstatic.h>
 #include <QtQml/QQmlEngine>
+#include <vector>
 
 ZSM_LOGGING_CATEGORY(DroneShowControllerLog, "Frontend.DroneShow.DroneShowController")
 
@@ -78,8 +80,18 @@ ShowSpecification* DroneShowController::showSpecification() const
     return _show;
 }
 
+void DroneShowController::clearShow()
+{
+    auto* previous = _show;
+    _show = nullptr;
+    _loadShow = false;
+    emit isLoadShowChanged(false);
+    if (previous) previous->deleteLater();
+}
+
 bool DroneShowController::droneShowFileLoad(QUrl url)
 {
+    if (MockVehicleController::instance()->clearing()) return false;
     QString strUrl = url.toLocalFile();
     zDebug(DroneShowControllerLog) << "show file url:" << strUrl;
 
@@ -128,7 +140,18 @@ void DroneShowController::_readShowJsonFile()
     _loadShow = true;
     emit isLoadShowChanged(_loadShow);
 
-    // load completed we inform backend add the same number MockVehicle
+    // Queue bounded batches so a large show does not flood the backend with one task per drone.
+    constexpr int kVehicleBatchSize = 256;
+    std::vector<int> vehicleIds;
+    vehicleIds.reserve(kVehicleBatchSize);
+    const auto enqueueBatch = [&vehicleIds]() {
+        if (vehicleIds.empty()) return;
+        zsmApp()->addTask([ids = std::move(vehicleIds)]() {
+            for (const int id : ids) MockVehicleManager::instance()->addMockVehicle(id);
+        });
+        vehicleIds.clear();
+        vehicleIds.reserve(kVehicleBatchSize);
+    };
     for (int i = 0; i < _show->drones()->count(); i ++) {
         DroneSpecification* drone = _show->drones()->at(i);
 
@@ -137,12 +160,9 @@ void DroneShowController::_readShowJsonFile()
         if ( drone->settings()->id == -1 ) {
             zCritical(DroneShowControllerLog) << "vehicle:" << drone->settings()->name << "calc id failed!";
         } else {
-            int te_id = drone->settings()->id;
-            zsmApp()->addTask([=]() {
-                MockVehicleManager::instance()->addMockVehicle(te_id);
-            });
-
+            vehicleIds.push_back(drone->settings()->id);
+            if (vehicleIds.size() == kVehicleBatchSize) enqueueBatch();
         }
     }
-
+    enqueueBatch();
 }

@@ -10,9 +10,11 @@
 #include "StandardMavlinkCodec.h"
 
 #include <QFile>
+#include <QRandomGenerator>
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <cmath>
 #include <vector>
 
 #include "Geo/ZSMGeo.h"
@@ -56,8 +58,75 @@ qint32 secondsUntilGpsTime(qint32 target, qint32 current)
 
 } // namespace
 
+namespace {
+
+struct SharedParameters {
+    QMap<int, QMap<QString, QVariant>> values;
+    QMap<int, QMap<QString, MAV_PARAM_TYPE>> types;
+    QList<int> componentIds;
+    QMap<int, QStringList> names;
+};
+
+const SharedParameters& sharedParameters()
+{
+    // Every mock vehicle uses the same APM Copter parameter defaults. The
+    // function-local static is initialized once, even when workers start in
+    // parallel, and stays immutable after construction.
+    static const SharedParameters parameters = [] {
+        SharedParameters result;
+        QFile paramFile(QStringLiteral(":/APM/Copter.OfflineEditing.params"));
+        const bool success = paramFile.open(QFile::ReadOnly);
+        Q_ASSERT(success);
+        if (!success) return result;
+
+        QTextStream paramStream(&paramFile);
+        while (!paramStream.atEnd()) {
+            const QString line = paramStream.readLine();
+            if (line.startsWith("#")) continue;
+
+            const QStringList paramData = line.split("\t");
+            assert(paramData.size() == 5);
+            const int compId = paramData.at(1).toInt();
+            const QString paramName = paramData.at(2);
+            const QString valStr = paramData.at(3);
+            const uint paramType = paramData.at(4).toUInt();
+
+            QVariant paramValue;
+            switch (paramType) {
+                case MAV_PARAM_TYPE_REAL32: paramValue = QVariant(valStr.toFloat()); break;
+                case MAV_PARAM_TYPE_UINT32: paramValue = QVariant(valStr.toUInt()); break;
+                case MAV_PARAM_TYPE_INT32: paramValue = QVariant(valStr.toInt()); break;
+                case MAV_PARAM_TYPE_UINT16: paramValue = QVariant((quint16)valStr.toUInt()); break;
+                case MAV_PARAM_TYPE_INT16: paramValue = QVariant((qint16)valStr.toInt()); break;
+                case MAV_PARAM_TYPE_UINT8: paramValue = QVariant((quint8)valStr.toUInt()); break;
+                case MAV_PARAM_TYPE_INT8: paramValue = QVariant((qint8)valStr.toInt()); break;
+                default:
+                    qCCritical(MockVehicleVerboseLog) << "Unknown type" << paramType;
+                    paramValue = QVariant(valStr.toInt());
+                    break;
+            }
+
+            zDebug(MockVehicleVerboseLog) << "Loading param" << paramName << paramValue;
+            result.values[compId][paramName] = paramValue;
+            result.types[compId][paramName] = static_cast<MAV_PARAM_TYPE>(paramType);
+        }
+        for (auto it = result.values.cbegin(); it != result.values.cend(); ++it) {
+            result.componentIds.append(it.key());
+            result.names.insert(it.key(), it.value().keys());
+        }
+        return result;
+    }();
+    return parameters;
+}
+
+} // namespace
+
 MockVehicle::MockVehicle(uint16_t vehicleId, QObject* parent)
 	: _mockVehicleFTP ( new MockVehicleFTP(vehicleId , MAV_COMP_ID_AUTOPILOT1, this))
+	, _mapParamName2Value(sharedParameters().values)
+	, _mapParamName2MavParamType(sharedParameters().types)
+	, _parameterComponentIds(sharedParameters().componentIds)
+	, _parameterNames(sharedParameters().names)
 {
 	// zInfo(MockVehicleLog) << "create Vehicle:" << vehicleId;
 
@@ -104,9 +173,10 @@ MockVehicle::MockVehicle(uint16_t vehicleId, QObject* parent)
 	_struct.battery.id = 1;
 	_struct.battery.battery_function = MAV_BATTERY_FUNCTION_ALL;
 
-	_struct.battery.battery_remaining = static_cast<uint8_t> (vehicleId);
-	zInfo(MockVehicleLog) << "battrey" << _struct.battery.battery_remaining << "id:" << vehicleId;
-	// _struct.battery.battery_remaining = static_cast<uint8_t> (100);
+	// Each pack starts above 90%, with independent simulated charge.
+	_struct.battery.battery_remaining = static_cast<int8_t>(QRandomGenerator::global()->bounded(91, 100));
+	_struct.battery.time_remaining = -1; // no discharge model
+	_struct.battery.charge_state = MAV_BATTERY_CHARGE_STATE_OK;
 	_struct.battery.type = MAV_BATTERY_TYPE_LIPO;
 	_struct.battery.temperature = 2100;
 	_struct.battery.current_battery = 600;
@@ -119,14 +189,12 @@ MockVehicle::MockVehicle(uint16_t vehicleId, QObject* parent)
 	_struct.gps.fix_type = GPS_FIX_TYPE_NO_GPS;
 
 	for (int i = 0; i < 10; i++) _struct.battery.voltages[i] = UINT16_MAX;
-	_struct.battery.voltages[0] = _struct.battery.voltages[1] = _struct.battery.voltages[2] = 4200;
+	const auto cellVoltage = static_cast<uint16_t>(4100 + (_struct.battery.battery_remaining - 91) * 10);
+	_struct.battery.voltages[0] = _struct.battery.voltages[1] = _struct.battery.voltages[2] = cellVoltage;
 	_runningTime.start();
 
 	// 初始化 FTP
 	;
-
-	//  参数加载
-	_loadParams();
 
 	// connect
 	connect(_parent, &MockVehicleWorker::_10HzSignal, this, &MockVehicle::run10HzTasks);
@@ -155,7 +223,7 @@ void MockVehicle::setCommLost(bool commLost)
 
 void MockVehicle::setBatteryRemaining(int remaining)
 {
-	if ( remaining > INT8_MAX || remaining < INT8_MIN ) return ;
+	if ( remaining > 100 || remaining < -1 ) return ;
 	if ( remaining == _struct.battery.battery_remaining ) return ;
 	zInfo(MockVehicleLog) << "get battery" << remaining;
 	_struct.battery.battery_remaining = static_cast<int8_t>(remaining);
@@ -256,13 +324,20 @@ void MockVehicle::_addToPackage(const mavlink_message_t &msg)
 {
 	if (_struct.commLost) return;
 
+	if (zsm::currentProtocolDomain() == zsm::ProtocolDomain::Standard8) {
+		std::vector<uint8_t> bytes;
+		if (!zsm::encodeStandard8Packet(msg, zsm::WireVersion::Mavlink2, bytes)) {
+			zWarning(MockVehicleLog) << "standard8 encode rejected periodic message" << msg.msgid
+			                         << "for vehicle" << _struct.vehicleId;
+			return;
+		}
+		_messagePackage.append(reinterpret_cast<const char*>(bytes.data()), static_cast<qsizetype>(bytes.size()));
+		return;
+	}
+
 	uint8_t buffer[MAVLINK_MAX_PACKET_LEN];
-	uint16_t cBuffer;
-
-	cBuffer = mavlink_msg_to_send_buffer(buffer, &msg);
-	QByteArray data = QByteArray(reinterpret_cast<char*>(buffer), cBuffer);
-
-	_messagePackage.append(data);
+	const uint16_t cBuffer = mavlink_msg_to_send_buffer(buffer, &msg);
+	_messagePackage.append(reinterpret_cast<const char*>(buffer), cBuffer);
 }
 
 void MockVehicle::_sendMessage(const mavlink_message_t &msg)
@@ -303,70 +378,6 @@ void MockVehicle::_500HzTaskDelete()
 	}
 }
 
-void MockVehicle::_loadParams()
-{
-	QFile paramFile;
-	if ( _struct.autopilot == MAV_AUTOPILOT_ARDUPILOTMEGA ) {
-		if ( _struct.type == MAV_TYPE_QUADROTOR ) {
-			paramFile.setFileName(":/APM/Copter.OfflineEditing.params");
-		}
-	}
-
-	const bool success = paramFile.open(QFile::ReadOnly);
-	Q_UNUSED(success);
-	Q_ASSERT(success);
-
-	QTextStream paramStream(&paramFile);
-	while ( !paramStream.atEnd() ) {
-		const QString line = paramStream.readLine();
-
-		if ( line.startsWith("#") ) {
-			continue;
-		}
-
-		const QStringList paramData = line.split("\t");
-		assert(paramData.size() == 5);
-
-		const int compId = paramData.at(1).toInt();
-		const QString paramName = paramData.at(2);
-		const QString valStr = paramData.at(3);
-		const uint paramType = paramData.at(4).toUInt();
-
-		QVariant paramValue;
-		switch (paramType) {
-			case MAV_PARAM_TYPE_REAL32:
-				paramValue = QVariant(valStr.toFloat());
-				break;
-			case MAV_PARAM_TYPE_UINT32:
-				paramValue = QVariant(valStr.toUInt());
-				break;
-			case MAV_PARAM_TYPE_INT32:
-				paramValue = QVariant(valStr.toInt());
-				break;
-			case MAV_PARAM_TYPE_UINT16:
-				paramValue = QVariant((quint16)valStr.toUInt());
-				break;
-			case MAV_PARAM_TYPE_INT16:
-				paramValue = QVariant((qint16)valStr.toInt());
-				break;
-			case MAV_PARAM_TYPE_UINT8:
-				paramValue = QVariant((quint8)valStr.toUInt());
-				break;
-			case MAV_PARAM_TYPE_INT8:
-				paramValue = QVariant((qint8)valStr.toUInt());
-				break;
-			default:
-				qCCritical(MockVehicleVerboseLog) << "Unknown type" << paramType;
-				paramValue = QVariant(valStr.toInt());
-				break;
-		}
-
-		zDebug(MockVehicleVerboseLog) << "Loading param" << paramName << paramValue;
-		_mapParamName2Value[compId][paramName] = paramValue;
-		_mapParamName2MavParamType[compId][paramName] = static_cast<MAV_PARAM_TYPE>(paramType);
-	}
-
-}
 
 void MockVehicle::_sendHeartBeat()
 {
@@ -388,28 +399,16 @@ void MockVehicle::_sendHeartBeat()
 
 void MockVehicle::_sendBatteryStatus()
 {
-	static constexpr double _batteryMaxTimeRemaining = 600;	// 10 分钟
-
-	// 电池剩余百分比计算
-	if (_struct.battery.battery_remaining > 1) {
-		//1. 用 elapsed 时间（毫秒）计算电池耗电百分比，30分钟内从100%降到0%
-		// _struct.battery.battery_remaining = static_cast<int8_t>(100 - static_cast<int8_t>( (_runningTime.elapsed() / (double)1000.0 )  / _batteryMaxTimeRemaining * 100.0));
-		
-		//2. 通过 setBatteryRemaining 设置
-
-		// 剩余时间
-		// _struct.battery.time_remaining = static_cast<double>(_batteryMaxTimeRemaining) * (_struct.battery.battery_remaining / 100.0);
-
-		// 状态判断阈值可保持不变
-		if (_struct.battery.battery_remaining > 50) {
-			_struct.battery.charge_state = MAV_BATTERY_CHARGE_STATE_OK;
-		} else if (_struct.battery.battery_remaining > 30) {
-			_struct.battery.charge_state = MAV_BATTERY_CHARGE_STATE_LOW;
-		} else if (_struct.battery.battery_remaining > 20) {
-			_struct.battery.charge_state = MAV_BATTERY_CHARGE_STATE_CRITICAL;
-		} else {
-			_struct.battery.charge_state = MAV_BATTERY_CHARGE_STATE_EMERGENCY;
-		}
+	if (_struct.battery.battery_remaining < 0) {
+		_struct.battery.charge_state = MAV_BATTERY_CHARGE_STATE_UNDEFINED;
+	} else if (_struct.battery.battery_remaining > 50) {
+		_struct.battery.charge_state = MAV_BATTERY_CHARGE_STATE_OK;
+	} else if (_struct.battery.battery_remaining > 30) {
+		_struct.battery.charge_state = MAV_BATTERY_CHARGE_STATE_LOW;
+	} else if (_struct.battery.battery_remaining > 20) {
+		_struct.battery.charge_state = MAV_BATTERY_CHARGE_STATE_CRITICAL;
+	} else {
+		_struct.battery.charge_state = MAV_BATTERY_CHARGE_STATE_EMERGENCY;
 	}
 
 	mavlink_message_t msg{};
@@ -453,7 +452,7 @@ void MockVehicle::_sendSysStatus()
 		_all,                          // onboard_control_sensors_enabled
 		_all,                          // onboard_control_sensors_health
 		250,                        // load
-		4200 * 3,                   // voltage_battery
+		static_cast<uint16_t>(_struct.battery.voltages[0] + _struct.battery.voltages[1] + _struct.battery.voltages[2]),
 		_struct.battery.current_battery,                       // current_battery
 		_struct.battery.battery_remaining,      // battery_remaining
 		0,0,0,0,0,0,0,0,0
@@ -470,7 +469,7 @@ void MockVehicle::_sendGpsRawInt()
 		_struct.componentId,
 		ZSM_MAVLINK_COMM,
 		&msg,
-		static_cast<uint64_t>(_runningTime.elapsed()),			///> unit : ms 先就这样吧
+		static_cast<uint64_t>(_runningTime.elapsed()) * 1000ULL,			///> microseconds since simulator start
 		_struct.gps.fix_type,
 		static_cast<int32_t>(_struct.gps.latitude * 1E7),
 		static_cast<int32_t>(_struct.gps.longitude * 1E7),
@@ -544,7 +543,7 @@ void MockVehicle::_sendAttitude()
 
 void MockVehicle::_sendShowStatus()
 {
-	uint8_t packet[14]{};
+	uint8_t packet[16]{}; // DATA16 packer copies all 16 data bytes.
 	std::memcpy(packet, &_showStartTimeGpsSec, sizeof(_showStartTimeGpsSec));
 
 	uint8_t flags = 0;
@@ -570,7 +569,7 @@ void MockVehicle::_sendShowStatus()
 		ZSM_MAVLINK_COMM,
 		&msg,
 		kDroneToGcsData16Type,
-		sizeof(packet),
+		14, // used status bytes; the remaining DATA16 bytes are zero padding
 		packet);
 	_addToPackage(msg);
 }
@@ -630,23 +629,18 @@ void MockVehicle::_handleCommandLong(const mavlink_message_t &msg)
 				commandResult = MAV_RESULT_DENIED;
 			}
 
-			if ( _struct.custom_mode == 6 ||	// rtl
-				 _struct.custom_mode ==	9 ||	// land
-				 _struct.custom_mode == 21 )	// smart_rtl
+			if (commandResult == MAV_RESULT_ACCEPTED &&
+				(_struct.custom_mode == 6 || _struct.custom_mode == 9 || _struct.custom_mode == 21))
 			{
-				// 把高度变为 0
-				_struct.gps.altitudeAMSL = 0;
+				updatePosition(QVector3D(_struct.gps.x, _struct.gps.y, 0.0f));
 				_struct.base_mode &= ~MAV_MODE_FLAG_SAFETY_ARMED;
-
-				// SphereModelController 变为对应的高度
-				DroneShowPlayerController::instance()->updateTakeoffVehicle(_struct.vehicleId, _struct.gps.altitudeAMSL);
+				DroneShowPlayerController::instance()->updateTakeoffVehicle(_struct.vehicleId, _struct.gps.altitudeRelative);
 			}
 
 			break;
 		}
 		case MAV_CMD_NAV_TAKEOFF:
-			_handleTakeoff(request);
-			commandResult = MAV_RESULT_ACCEPTED;
+			commandResult = _handleTakeoff(request) ? MAV_RESULT_ACCEPTED : MAV_RESULT_DENIED;
 			break;
 		default:
 			break;
@@ -689,13 +683,14 @@ void MockVehicle::_handleParamRequestList(const mavlink_message_t &msg)
 	_500HzTaskAdd();
 }
 
-void MockVehicle::_handleTakeoff(const mavlink_command_long_t &request)
+bool MockVehicle::_handleTakeoff(const mavlink_command_long_t &request)
 {
-	_struct.gps.altitudeAMSL = _struct.gps.altitudeAMSL + request.param7;
+	if (!std::isfinite(request.param7) || request.param7 <= 0.0f) return false;
+	const float targetAltitude = std::max(static_cast<float>(_struct.gps.z), request.param7);
+	updatePosition(QVector3D(_struct.gps.x, _struct.gps.y, targetAltitude));
 	_struct.base_mode |= MAV_MODE_FLAG_SAFETY_ARMED;
-
-	// SphereModelController 变为对应的高度
-	DroneShowPlayerController::instance()->updateTakeoffVehicle(_struct.vehicleId, _struct.gps.altitudeAMSL);
+	DroneShowPlayerController::instance()->updateTakeoffVehicle(_struct.vehicleId, _struct.gps.altitudeRelative);
+	return true;
 }
 
 void MockVehicle::_handleRequestDataStream(const mavlink_message_t &msg)
@@ -855,9 +850,17 @@ void MockVehicle::_paramRequestListWorker()
 		return;
 	}
 
-	const int componentId = _mapParamName2Value.keys()[_currentParamRequestListComponentIndex];
-	const int cParameters = _mapParamName2Value[componentId].count();
-	const QString paramName = _mapParamName2Value[componentId].keys()[_currentParamRequestListParamIndex];
+	const int componentId = _parameterComponentIds.at(_currentParamRequestListComponentIndex);
+	const auto valueIt = _mapParamName2Value.constFind(componentId);
+	const auto typeIt = _mapParamName2MavParamType.constFind(componentId);
+	Q_ASSERT(valueIt != _mapParamName2Value.cend() && typeIt != _mapParamName2MavParamType.cend());
+	const auto& componentValues = valueIt.value();
+	const auto& componentTypes = typeIt.value();
+	const auto namesIt = _parameterNames.constFind(componentId);
+	Q_ASSERT(namesIt != _parameterNames.cend());
+	const auto& names = namesIt.value();
+	const int cParameters = names.count();
+	const QString& paramName = names.at(_currentParamRequestListParamIndex);
 
 
 
@@ -875,15 +878,15 @@ void MockVehicle::_paramRequestListWorker()
 
 			mavlink_message_t responseMsg{};
 
-			assert(_mapParamName2Value[componentId].contains(paramName));
-			assert(_mapParamName2MavParamType[componentId].contains(paramName));
+			assert(componentValues.contains(paramName));
+			assert(componentTypes.contains(paramName));
 
-			const MAV_PARAM_TYPE paramType = _mapParamName2MavParamType[componentId][paramName];
+			const MAV_PARAM_TYPE paramType = componentTypes.value(paramName);
 
 			assert(paramName.length() <= MAVLINK_MSG_ID_PARAM_VALUE_LEN);
 			(void) strncpy(paramId, paramName.toLocal8Bit().constData(), MAVLINK_MSG_ID_PARAM_VALUE_LEN);
 
-			zDebug(MockVehicleVerboseLog) << "sending msg_param_value" << componentId << paramId << paramType << _mapParamName2Value[componentId][paramId];
+			zDebug(MockVehicleVerboseLog) << "sending msg_param_value" << componentId << paramId << paramType << componentValues.value(paramName);
 			(void) mavlink_msg_param_value_pack_chan(
 				_struct.vehicleId,
 				_struct.componentId,                                   // component id
@@ -903,7 +906,7 @@ void MockVehicle::_paramRequestListWorker()
 	// Move to next param index
 	if (++_currentParamRequestListParamIndex >= cParameters) {
 		// We've sent the last parameter for this component, move to next component
-		if (++_currentParamRequestListComponentIndex >= _mapParamName2Value.keys().count()) {
+		if (++_currentParamRequestListComponentIndex >= _parameterComponentIds.count()) {
 			// We've finished sending the last parameter for the last component, request is complete
 			_currentParamRequestListComponentIndex = -1;
 			// disconnect
@@ -919,12 +922,15 @@ void MockVehicle::_paramRequestListWorker()
 
 float MockVehicle::_floatUnionForParam(int componentId, const QString &paramName)
 {
-	Q_ASSERT(_mapParamName2Value.contains(componentId));
-    Q_ASSERT(_mapParamName2Value[componentId].contains(paramName));
-    Q_ASSERT(_mapParamName2MavParamType[componentId].contains(paramName));
+	const auto valueIt = _mapParamName2Value.constFind(componentId);
+    const auto typeIt = _mapParamName2MavParamType.constFind(componentId);
+    Q_ASSERT(valueIt != _mapParamName2Value.cend() && typeIt != _mapParamName2MavParamType.cend());
+    const auto& componentValues = valueIt.value();
+    const auto& componentTypes = typeIt.value();
+    Q_ASSERT(componentValues.contains(paramName) && componentTypes.contains(paramName));
 
-    const MAV_PARAM_TYPE paramType = _mapParamName2MavParamType[componentId][paramName];
-    const QVariant paramVar = _mapParamName2Value[componentId][paramName];
+    const MAV_PARAM_TYPE paramType = componentTypes.value(paramName);
+    const QVariant paramVar = componentValues.value(paramName);
 
     mavlink_param_union_t valueUnion{};
     switch (paramType) {
